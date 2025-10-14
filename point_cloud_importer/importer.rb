@@ -68,8 +68,7 @@ module PointCloudImporter
         settings[:density],
         settings[:max_display_points]
       ]
-      style_list = available_style_labels.join('|')
-      lists = ['', style_list, '', '']
+      lists = ['', 'квадрат|круг|крест', '', '']
       input = UI.inputbox(prompts, defaults, lists, 'Настройки визуализации')
       return unless input
 
@@ -91,41 +90,28 @@ module PointCloudImporter
     end
 
     def display_name(style)
-      style = style.to_sym rescue nil
-      style = PointCloud.default_point_style unless PointCloud.available_point_style?(style)
-      STYLE_LABELS.fetch(style, STYLE_LABELS.fetch(PointCloud.default_point_style, 'квадрат'))
+      STYLE_LABELS.fetch(style.to_sym, 'квадрат')
     rescue StandardError
-      STYLE_LABELS.fetch(PointCloud.default_point_style, 'квадрат')
+      'квадрат'
     end
 
     def resolve_style(value)
-      return value if value.is_a?(Symbol) && PointCloud.available_point_style?(value)
+      return value if value.is_a?(Symbol) && PointCloud::POINT_STYLES.key?(value)
 
       normalized = value.to_s.downcase
       STYLE_LABELS.each do |symbol, label|
-        next unless PointCloud.available_point_style?(symbol)
-
         return symbol if label == normalized
       end
 
-      style = case normalized
-              when 'square' then :square
-              when 'round' then :round
-              when 'plus' then :plus
-              when 'крест' then :plus
-              when 'круг' then :round
-              else
-                PointCloud.default_point_style
-              end
-
-      PointCloud.available_point_style?(style) ? style : PointCloud.default_point_style
-    end
-
-    def available_style_labels
-      labels = PointCloud.available_point_styles.filter_map { |style| STYLE_LABELS[style] }
-      return labels unless labels.empty?
-
-      [STYLE_LABELS.fetch(PointCloud.default_point_style, 'квадрат')]
+      case normalized
+      when 'square' then :square
+      when 'round' then :round
+      when 'plus' then :plus
+      when 'крест' then :plus
+      when 'круг' then :round
+      else
+        :square
+      end
     end
 
   end

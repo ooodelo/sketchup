@@ -50,10 +50,7 @@ module PointCloudImporter
         view.draw_polyline(@first_point, @second_point)
         draw_dimension(view)
       else
-        style = PointCloud.style_constant(:round)
-        options = { size: 6 }
-        options[:style] = style if style
-        view.draw_points([@first_point], **options)
+        view.draw_points([@first_point], size: 6, style: Sketchup::View::DRAW_POINTS_ROUND)
       end
     end
 
