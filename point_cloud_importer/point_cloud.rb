@@ -16,27 +16,6 @@ module PointCloudImporter
       plus: %i[DRAW_POINTS_PLUS DRAW_POINTS_CROSS]
     }.freeze
 
-    POINT_STYLES = POINT_STYLE_CANDIDATES.transform_values do |candidates|
-      constant_name = candidates.find do |name|
-        Sketchup::View.const_defined?(name)
-      rescue NameError
-        false
-      end
-
-      if constant_name
-        begin
-          Sketchup::View.const_get(constant_name)
-        rescue NameError
-          nil
-        end
-      else
-        nil
-      end
-    end.freeze
-
-    AVAILABLE_POINT_STYLES = POINT_STYLES.select { |_key, value| value }.keys.freeze
-    DEFAULT_POINT_STYLE = AVAILABLE_POINT_STYLES.first || :square
-
     def initialize(name:, points:, colors: nil, metadata: {})
       @name = name
       @points = points
@@ -224,7 +203,7 @@ module PointCloudImporter
       style = style.to_sym rescue nil
       return style if style && self.class.available_point_style?(style)
 
-      DEFAULT_POINT_STYLE
+      self.class.default_point_style
     end
 
     def persist_style!(style)
@@ -238,26 +217,63 @@ module PointCloudImporter
     end
 
     class << self
+      def style_constants
+        @style_constants ||= compute_style_constants
+      end
+
+      def compute_style_constants
+        return {} unless defined?(Sketchup::View)
+
+        POINT_STYLE_CANDIDATES.each_with_object({}) do |(key, candidates), memo|
+          memo[key] = resolve_view_constant(candidates)
+        end
+      end
+
+      def resolve_view_constant(candidates)
+        return nil unless defined?(Sketchup::View)
+
+        candidates.each do |const_name|
+          next unless view_const_defined?(const_name)
+
+          value = view_const_get(const_name)
+          return value if value
+        end
+
+        nil
+      end
+
+      def view_const_defined?(const_name)
+        Sketchup::View.const_defined?(const_name, false)
+      rescue NameError
+        false
+      end
+
+      def view_const_get(const_name)
+        Sketchup::View.const_get(const_name, false)
+      rescue NameError
+        nil
+      end
+
       def available_point_style?(style)
         style = style.to_sym rescue nil
         return false unless style
 
-        !POINT_STYLES[style].nil?
+        !style_constants[style].nil?
       end
 
       def style_constant(style)
         style = style.to_sym rescue nil
         return unless style
 
-        POINT_STYLES[style]
+        style_constants[style]
       end
 
       def available_point_styles
-        AVAILABLE_POINT_STYLES
+        style_constants.select { |_key, value| value }.keys
       end
 
       def default_point_style
-        DEFAULT_POINT_STYLE
+        available_point_styles.first || :square
       end
     end
   end

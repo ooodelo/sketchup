@@ -34,7 +34,6 @@
 ## Установка
 1. Скачайте или склонируйте репозиторий.
 2. Поместите папку `point_cloud_importer` и файл `point_cloud_importer.rb` в каталог плагинов SketchUp (`~/Library/Application Support/SketchUp 2023/SketchUp/Plugins`).
-   - Альтернатива: создайте архив `.rbz`, упаковывая `point_cloud_importer.rb` и папку `point_cloud_importer` в ZIP и переименовывая файл в `point_cloud_importer.rbz`. Затем установите его через **SketchUp → Preferences → Extensions → Install Extension...**
 3. Перезапустите SketchUp. В меню Extensions появится раздел **Point Cloud Importer** и соответствующая панель инструментов.
 
 ## Структура файлов плагина

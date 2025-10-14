@@ -12,7 +12,7 @@ module PointCloudImporter
       def initialize(manager)
         @manager = manager
         settings = Settings.instance
-        @dialog = UI::HtmlDialog.new(
+        @dialog = ::UI::HtmlDialog.new(
           dialog_title: 'Менеджер облаков точек',
           preferences_key: 'PointCloudImporter::ManagerDialog',
           scrollable: true,
