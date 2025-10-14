@@ -10,11 +10,32 @@ module PointCloudImporter
     attr_accessor :visible
     attr_reader :point_size, :point_style
 
-    POINT_STYLES = {
-      square: Sketchup::View::DRAW_POINTS_SQUARES,
-      round: Sketchup::View::DRAW_POINTS_ROUND,
-      plus: Sketchup::View::DRAW_POINTS_PLUS
+    POINT_STYLE_CANDIDATES = {
+      square: %i[DRAW_POINTS_SQUARES DRAW_POINTS_SQUARE DRAW_POINTS_OPEN_SQUARE],
+      round: %i[DRAW_POINTS_ROUND DRAW_POINTS_OPEN_CIRCLE],
+      plus: %i[DRAW_POINTS_PLUS DRAW_POINTS_CROSS]
     }.freeze
+
+    POINT_STYLES = POINT_STYLE_CANDIDATES.transform_values do |candidates|
+      constant_name = candidates.find do |name|
+        Sketchup::View.const_defined?(name)
+      rescue NameError
+        false
+      end
+
+      if constant_name
+        begin
+          Sketchup::View.const_get(constant_name)
+        rescue NameError
+          nil
+        end
+      else
+        nil
+      end
+    end.freeze
+
+    AVAILABLE_POINT_STYLES = POINT_STYLES.select { |_key, value| value }.keys.freeze
+    DEFAULT_POINT_STYLE = AVAILABLE_POINT_STYLES.first || :square
 
     def initialize(name:, points:, colors: nil, metadata: {})
       @name = name
@@ -24,7 +45,8 @@ module PointCloudImporter
       @visible = true
       @settings = Settings.instance
       @point_size = @settings[:point_size]
-      @point_style = @settings[:point_style]
+      @point_style = ensure_valid_style(@settings[:point_style])
+      persist_style!(@point_style) if @point_style != @settings[:point_style]
       @display_density = @settings[:density]
       @max_display_points = @settings[:max_display_points]
       @display_points = nil
@@ -54,12 +76,10 @@ module PointCloudImporter
 
     def point_style=(style)
       style = style.to_sym
-      return unless POINT_STYLES.key?(style)
+      return unless self.class.available_point_style?(style)
 
       @point_style = style
-      settings = Settings.instance
-      settings[:point_style] = @point_style
-      settings.save!
+      persist_style!(@point_style)
     end
 
     def density=(value)
@@ -97,12 +117,17 @@ module PointCloudImporter
 
       view.drawing_color = nil
       view.line_width = 0
-      style = POINT_STYLES.fetch(@point_style, Sketchup::View::DRAW_POINTS_SQUARES)
+      style = self.class.style_constant(@point_style)
       batches do |points_batch, colors_batch|
         if colors_batch
-          view.draw_points(points_batch, size: @point_size, style: style, colors: colors_batch)
+          draw_options = { size: @point_size }
+          draw_options[:style] = style if style
+          draw_options[:colors] = colors_batch
+          view.draw_points(points_batch, **draw_options)
         else
-          view.draw_points(points_batch, size: @point_size, style: style)
+          draw_options = { size: @point_size }
+          draw_options[:style] = style if style
+          view.draw_points(points_batch, **draw_options)
         end
       end
     end
@@ -193,6 +218,47 @@ module PointCloudImporter
         sample_indices << index
       end
       @spatial_index = SpatialIndex.new(sample_points, sample_indices)
+    end
+
+    def ensure_valid_style(style)
+      style = style.to_sym rescue nil
+      return style if style && self.class.available_point_style?(style)
+
+      DEFAULT_POINT_STYLE
+    end
+
+    def persist_style!(style)
+      return unless self.class.available_point_style?(style)
+
+      settings = Settings.instance
+      return if settings[:point_style] == style
+
+      settings[:point_style] = style
+      settings.save!
+    end
+
+    class << self
+      def available_point_style?(style)
+        style = style.to_sym rescue nil
+        return false unless style
+
+        !POINT_STYLES[style].nil?
+      end
+
+      def style_constant(style)
+        style = style.to_sym rescue nil
+        return unless style
+
+        POINT_STYLES[style]
+      end
+
+      def available_point_styles
+        AVAILABLE_POINT_STYLES
+      end
+
+      def default_point_style
+        DEFAULT_POINT_STYLE
+      end
     end
   end
 end
