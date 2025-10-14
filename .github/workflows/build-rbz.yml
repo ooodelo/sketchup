@@ -1,0 +1,63 @@
+name: Build & Release SketchUp RBZ
+
+on:
+  workflow_dispatch:
+    inputs:
+      rbz_name:
+        description: 'Имя файла RBZ без .rbz (напр., point_cloud_importer)'
+        required: true
+        default: 'point_cloud_importer'
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install zip
+        run: sudo apt-get update && sudo apt-get install -y zip
+
+      - name: Build RBZ (zip)
+        id: build
+        run: |
+          NAME="${{ github.event.inputs.rbz_name || 'point_cloud_importer' }}"
+          mkdir -p dist
+          # Собираем: главный файл плагина (.rb) и папку с исходниками (одноимённую)
+          # Пример структуры в репо:
+          #   point_cloud_importer.rb
+          #   point_cloud_importer/** (ruby, html, images, icons)
+          test -f "${NAME}.rb" || (echo "Не найден файл ${NAME}.rb в корне репозитория" && exit 1)
+          test -d "${NAME}" || (echo "Не найдена папка ${NAME}/ в корне репозитория" && exit 1)
+          zip -r "dist/${NAME}.rbz" "${NAME}.rb" "${NAME}"
+          echo "rbz_path=dist/${NAME}.rbz" >> $GITHUB_OUTPUT
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rbz
+          path: ${{ steps.build.outputs.rbz_path }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rbz
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.rbz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
