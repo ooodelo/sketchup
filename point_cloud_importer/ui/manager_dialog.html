@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Point Cloud Manager</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      margin: 0;
+      padding: 16px;
+      background-color: #1f1f1f;
+      color: #f5f5f5;
+    }
+
+    h1 {
+      font-size: 20px;
+      margin-bottom: 12px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th, td {
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 8px;
+      text-align: left;
+    }
+
+    tr.active {
+      background-color: rgba(255, 166, 0, 0.2);
+    }
+
+    button {
+      padding: 6px 10px;
+      margin-right: 4px;
+      background-color: #ff9800;
+      color: #1f1f1f;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background-color: #424242;
+      color: #fafafa;
+    }
+
+    input[type="range"] {
+      width: 120px;
+    }
+
+    .meta {
+      font-size: 12px;
+      color: #aaaaaa;
+    }
+  </style>
+</head>
+<body>
+  <h1>Импортированные облака</h1>
+  <table id="cloud-table">
+    <thead>
+      <tr>
+        <th>Имя</th>
+        <th>Точек</th>
+        <th>Плотность</th>
+        <th>Размер точки</th>
+        <th>Привязка</th>
+        <th>Действия</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    window.pci = {
+      update(payload) {
+        const tbody = document.querySelector('#cloud-table tbody');
+        tbody.innerHTML = '';
+        payload.clouds.forEach((cloud, index) => {
+          const row = document.createElement('tr');
+          if (cloud.active) {
+            row.classList.add('active');
+          }
+          row.innerHTML = `
+            <td>
+              <div>${cloud.name}</div>
+              <div class="meta">${cloud.metadata.comments ? cloud.metadata.comments.join('<br>') : ''}</div>
+            </td>
+            <td>${cloud.points.toLocaleString('ru-RU')}</td>
+            <td>
+              <input type="range" min="0.05" max="1" step="0.05" value="${cloud.density}" data-index="${index}" class="density" />
+              <div class="meta">${(cloud.density * 100).toFixed(0)}%</div>
+            </td>
+            <td>
+              <input type="range" min="1" max="10" step="1" value="${cloud.point_size}" data-index="${index}" class="point-size" />
+            </td>
+            <td>
+              <button class="inference" data-index="${index}">${cloud.inference ? 'Выключить' : 'Включить'}</button>
+              <div class="meta">${cloud.inference ? 'Созданы направляющие точки' : 'Нет направляющих'}</div>
+            </td>
+            <td>
+              <button class="toggle" data-index="${index}">${cloud.visible ? 'Скрыть' : 'Показать'}</button>
+              <button class="activate secondary" data-index="${index}">Активировать</button>
+              <button class="remove secondary" data-index="${index}">Удалить</button>
+            </td>
+          `;
+          tbody.appendChild(row);
+        });
+        wireEvents();
+      }
+    };
+
+    function wireEvents() {
+      document.querySelectorAll('button.toggle').forEach(button => {
+        button.addEventListener('click', () => {
+          const index = button.dataset.index;
+          window.sketchup && window.sketchup.pci_toggle_visibility(index);
+        });
+      });
+
+      document.querySelectorAll('button.activate').forEach(button => {
+        button.addEventListener('click', () => {
+          const index = button.dataset.index;
+          window.sketchup && window.sketchup.pci_activate(index);
+        });
+      });
+
+      document.querySelectorAll('button.remove').forEach(button => {
+        button.addEventListener('click', () => {
+          const index = button.dataset.index;
+          if (confirm('Удалить облако?')) {
+            window.sketchup && window.sketchup.pci_remove(index);
+          }
+        });
+      });
+
+      document.querySelectorAll('input.density').forEach(input => {
+        input.addEventListener('input', () => {
+          const index = input.dataset.index;
+          window.sketchup && window.sketchup.pci_density(index, input.value);
+        });
+      });
+
+      document.querySelectorAll('input.point-size').forEach(input => {
+        input.addEventListener('input', () => {
+          const index = input.dataset.index;
+          window.sketchup && window.sketchup.pci_point_size(index, input.value);
+        });
+      });
+
+      document.querySelectorAll('button.inference').forEach(button => {
+        button.addEventListener('click', () => {
+          const index = button.dataset.index;
+          window.sketchup && window.sketchup.pci_toggle_inference(index);
+        });
+      });
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      window.sketchup && window.sketchup.pci_ready();
+    });
+  </script>
+</body>
+</html>
