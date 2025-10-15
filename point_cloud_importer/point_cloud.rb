@@ -135,6 +135,12 @@ module PointCloudImporter
       refresh_inference_guides!
     end
 
+    def prepare_render_cache!
+      build_display_cache!
+      refresh_inference_guides!
+      self
+    end
+
     def draw(view)
       ensure_display_caches!
       caches = @lod_caches

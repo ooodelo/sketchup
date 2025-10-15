@@ -165,6 +165,7 @@ module PointCloudImporter
 
       cloud.update_metadata!(metadata)
       apply_visual_options(cloud, job.options)
+      cloud.prepare_render_cache!
 
       unless job.cloud_added?
         @manager.add_cloud(cloud)
