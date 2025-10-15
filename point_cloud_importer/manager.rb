@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'singleton'
+require 'thread'
 
 require_relative 'point_cloud'
 require_relative 'viewer_overlay'
@@ -11,37 +12,61 @@ module PointCloudImporter
   class Manager
     include Singleton
 
-    attr_reader :clouds
     attr_accessor :active_cloud
 
     def initialize
+      @clouds_lock = Mutex.new
       @clouds = []
       @overlay = nil
       @active_cloud = nil
     end
 
+    def clouds
+      @clouds_lock.synchronize { @clouds.dup }
+    end
+
     def add_cloud(cloud)
-      @clouds << cloud
-      @active_cloud = cloud
-      ensure_overlay!
+      @clouds_lock.synchronize do
+        @clouds << cloud
+        @active_cloud = cloud
+        ensure_overlay!
+      end
       view.invalidate if view
     end
 
     def remove_cloud(cloud)
-      return unless @clouds.delete(cloud)
+      removed_cloud = nil
+      @clouds_lock.synchronize do
+        removed_cloud = @clouds.delete(cloud)
+        return unless removed_cloud
 
-      cloud.dispose!
-      @active_cloud = @clouds.last
+        @active_cloud = @clouds.last
+      end
+
+      removed_cloud.dispose!
       view.invalidate if view
     end
 
     def clear!
-      @clouds.each(&:dispose!)
-      @clouds.clear
-      @active_cloud = nil
-      if @overlay && Sketchup.active_model.respond_to?(:model_overlays)
-        Sketchup.active_model.model_overlays.remove(@overlay)
-        @overlay = nil
+      clouds_to_dispose = []
+      overlay_to_remove = nil
+      model = Sketchup.active_model
+      supports_overlays = model.respond_to?(:model_overlays)
+
+      @clouds_lock.synchronize do
+        clouds_to_dispose = @clouds.dup
+        @clouds.clear
+        @active_cloud = nil
+        if supports_overlays
+          overlay_to_remove = @overlay
+          @overlay = nil
+        end
+      end
+
+      clouds_to_dispose.each(&:dispose!)
+
+      if overlay_to_remove
+        model.model_overlays.remove(overlay_to_remove)
       end
     end
 
@@ -75,7 +100,9 @@ module PointCloudImporter
     end
 
     def draw(view)
-      @clouds.each do |cloud|
+      clouds_snapshot = @clouds_lock.synchronize { @clouds.dup }
+
+      clouds_snapshot.each do |cloud|
         next unless cloud.visible?
 
         cloud.draw(view)
