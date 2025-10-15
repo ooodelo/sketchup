@@ -130,6 +130,7 @@ module PointCloudImporter
     def pick_point(view, x, y)
       cloud = active_cloud
       return unless cloud&.visible?
+      return unless cloud.points && cloud.points.length.positive?
 
       ray = view.pickray(x, y)
       return unless ray
