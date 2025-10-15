@@ -5,14 +5,19 @@ require 'stringio'
 require_relative 'settings'
 require_relative 'point_cloud'
 require_relative 'ply_parser'
+require_relative 'import_job'
+require_relative 'ui/import_progress_dialog'
 
 module PointCloudImporter
   # High-level importer orchestrating parsing and creation of point clouds.
   class Importer
     Result = Struct.new(:cloud, :duration)
 
+    attr_reader :last_result
+
     def initialize(manager)
       @manager = manager
+      @last_result = nil
     end
 
     def import_from_dialog
@@ -27,36 +32,9 @@ module PointCloudImporter
 
     def import(path, options = {})
       options = { import_step: 1 }.merge(options || {})
-      start_time = Time.now
-      parser = PlyParser.new(path, import_step: options[:import_step], progress_callback: method(:report_progress))
-      points, colors, metadata = parser.parse
-      raise ArgumentError, 'PLY файл не содержит точек' if points.nil? || points.empty?
-
-      name = File.basename(path, '.*')
-      cloud = PointCloud.new(name: name, points: points, colors: colors, metadata: metadata)
-      cloud.density = options[:display_density] if options[:display_density]
-      cloud.point_size = options[:point_size] if options[:point_size]
-      cloud.point_style = options[:point_style] if options[:point_style]
-      cloud.max_display_points = options[:max_display_points] if options[:max_display_points]
-
-      @manager.add_cloud(cloud)
-      duration = Time.now - start_time
-      total_vertices = parser.total_vertex_count.to_i
-      total_vertices = points.length if total_vertices.zero?
-      import_step = parser.import_step
-      UI.messagebox(
-        "Импорт завершен за #{format('%.2f', duration)} сек. " \
-        "Импортировано #{points.length} из #{total_vertices} точек (каждая #{import_step}-я)"
-      )
-      Result.new(cloud, duration)
-    rescue PlyParser::UnsupportedFormat => e
-      UI.messagebox("Формат не поддерживается: #{e.message}")
-      nil
-    rescue StandardError => e
-      UI.messagebox("Ошибка импорта: #{e.message}")
-      nil
-    ensure
-      reset_progress
+      job = ImportJob.new(path, options)
+      run_job(job)
+      job
     end
 
     STYLE_LABELS = {
@@ -66,6 +44,112 @@ module PointCloudImporter
     }.freeze
 
     private
+
+    def run_job(job)
+      @last_result = nil
+      progress_dialog = UI::ImportProgressDialog.new(job) { job.cancel! }
+      progress_dialog.show
+
+      worker = Thread.new do
+        Thread.current.abort_on_exception = false
+        begin
+          job.start!
+          job.update_progress(0.0, 'Чтение PLY...')
+          start_time = Time.now
+          parser = PlyParser.new(
+            job.path,
+            import_step: job.options[:import_step],
+            progress_callback: job.progress_callback,
+            cancelled_callback: -> { job.cancel_requested? }
+          )
+          points, colors, metadata = parser.parse
+          if job.cancel_requested?
+            job.mark_cancelled!
+          else
+            total_vertices = parser.total_vertex_count.to_i
+            total_vertices = points.length if total_vertices.zero?
+            job.complete!(
+              points: points,
+              colors: colors,
+              metadata: metadata,
+              duration: Time.now - start_time,
+              total_vertices: total_vertices,
+              import_step: parser.import_step
+            )
+          end
+        rescue PlyParser::Cancelled
+          job.mark_cancelled!
+        rescue PlyParser::UnsupportedFormat => e
+          job.fail!(e)
+        rescue StandardError => e
+          job.fail!(e)
+        end
+      end
+
+      job.thread = worker
+
+      timer_id = nil
+      timer_id = UI.start_timer(0.1, repeat: true) do
+        progress_dialog.update
+        next unless job.finished?
+
+        UI.stop_timer(timer_id) if timer_id
+        progress_dialog.close
+        job.thread&.join
+        finalize_job(job)
+      end
+    end
+
+    def finalize_job(job)
+      case job.status
+      when :completed
+        create_cloud(job)
+      when :failed
+        @last_result = nil
+        UI.messagebox("Ошибка импорта: #{job.error.message}") if job.error
+      when :cancelled
+        @last_result = nil
+        UI.messagebox('Импорт отменен пользователем.')
+      else
+        @last_result = nil
+      end
+    end
+
+    def create_cloud(job)
+      data = job.result
+      points = data[:points]
+      colors = data[:colors]
+      metadata = data[:metadata]
+      duration = data[:duration]
+      total_vertices = data[:total_vertices]
+      import_step = data[:import_step]
+
+      raise ArgumentError, 'PLY файл не содержит точек' if points.nil? || points.empty?
+
+      name = File.basename(job.path, '.*')
+      cloud = PointCloud.new(name: name, points: points, colors: colors, metadata: metadata)
+      apply_visual_options(cloud, job.options)
+
+      @manager.add_cloud(cloud)
+      UI.messagebox(
+        "Импорт завершен за #{format('%.2f', duration)} сек. " \
+        "Импортировано #{points.length} из #{total_vertices} точек (каждая #{import_step}-я)"
+      )
+      result = Result.new(cloud, duration)
+      @last_result = result
+      result
+    rescue StandardError => e
+      @last_result = nil
+      UI.messagebox("Ошибка импорта: #{e.message}")
+      nil
+    end
+
+    def apply_visual_options(cloud, options)
+      cloud.density = options[:display_density] if options[:display_density]
+      cloud.point_size = options[:point_size] if options[:point_size]
+      cloud.point_style = options[:point_style] if options[:point_style]
+      cloud.max_display_points = options[:max_display_points] if options[:max_display_points]
+    end
 
     def prompt_options
       settings = Settings.instance
@@ -98,14 +182,6 @@ module PointCloudImporter
         max_display_points: max_points.to_i,
         import_step: import_step
       }
-    end
-
-    def report_progress(percent, message)
-      UI.status_text = format('Импорт облака: %<percent>.1f%% — %<message>s', percent: percent * 100.0, message: message)
-    end
-
-    def reset_progress
-      UI.status_text = ''
     end
 
     def display_name(style)
@@ -157,6 +233,5 @@ module PointCloudImporter
       UI.messagebox('Шаг импорта должен быть целым числом 1 или больше.')
       nil
     end
-
   end
 end

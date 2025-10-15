@@ -6,6 +6,8 @@ module PointCloudImporter
     # Parser for PLY point cloud files (ASCII, binary little endian or binary big endian).
   class PlyParser
     UnsupportedFormat = Class.new(StandardError)
+    Cancelled = Class.new(StandardError)
+
 
     TYPE_MAP = {
       'char' => 'c',
@@ -48,10 +50,11 @@ module PointCloudImporter
 
     attr_reader :path, :total_vertex_count, :import_step
 
-    def initialize(path, import_step: 1, progress_callback: nil)
+    def initialize(path, import_step: 1, progress_callback: nil, cancelled_callback: nil)
       @path = path
       @import_step = normalize_import_step(import_step)
       @progress_callback = progress_callback
+      @cancelled_callback = cancelled_callback
       @total_vertex_count = 0
     end
 
@@ -76,6 +79,16 @@ module PointCloudImporter
     end
 
     private
+
+    def cancelled?
+      @cancelled_callback && @cancelled_callback.call
+    rescue StandardError
+      false
+    end
+
+    def check_cancelled!
+      raise Cancelled if cancelled?
+    end
 
     def parse_header(io)
       header = { properties: [], metadata: {} }
@@ -117,6 +130,7 @@ module PointCloudImporter
       color_indices = color_property_indices(property_index_by_name)
 
       vertex_count.times do |index|
+        check_cancelled!
         report(index, vertex_count)
         line = io.gets
         break unless line
@@ -146,6 +160,7 @@ module PointCloudImporter
       vertex_buffer = ''.b
 
       vertex_count.times do |index|
+        check_cancelled!
         report(index, vertex_count)
         data = io.read(stride)
         break unless data && data.length == stride
@@ -176,6 +191,7 @@ module PointCloudImporter
       vertex_buffer = ''.b
 
       vertex_count.times do |index|
+        check_cancelled!
         report(index, vertex_count)
         data = io.read(stride)
         break unless data && data.length == stride
@@ -278,6 +294,7 @@ module PointCloudImporter
     end
 
     def report(current, total)
+      check_cancelled!
       return unless @progress_callback
       return if total <= 0
 
