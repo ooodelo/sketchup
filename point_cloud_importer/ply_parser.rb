@@ -26,17 +26,20 @@ module PointCloudImporter
       'float64' => 'E'
     }.freeze
 
-    attr_reader :path
+    attr_reader :path, :total_vertex_count, :import_step
 
-    def initialize(path, decimation: nil, progress_callback: nil)
+    def initialize(path, import_step: 1, progress_callback: nil)
       @path = path
-      @decimation = decimation
+      @import_step = normalize_import_step(import_step)
       @progress_callback = progress_callback
+      @total_vertex_count = 0
     end
 
     def parse
       File.open(path, 'rb') do |io|
         header = parse_header(io)
+        @total_vertex_count = header[:vertex_count] ? header[:vertex_count].to_i : 0
+
         case header[:format]
         when :ascii
           parse_ascii(io, header)
@@ -80,17 +83,16 @@ module PointCloudImporter
     def parse_ascii(io, header)
       points = []
       colors = []
-      vertex_count = header[:vertex_count]
+      vertex_count = header[:vertex_count] ? header[:vertex_count].to_i : 0
       properties = header[:properties]
-      decimation = (@decimation || 1).to_i
-      decimation = 1 if decimation < 1
+      import_step = @import_step
 
       vertex_count.times do |index|
         report(index, vertex_count)
         line = io.gets
         break unless line
 
-        next unless (index % decimation).zero?
+        next unless (index % import_step).zero?
 
         values = line.split
         point, color = interpret_vertex(values, properties)
@@ -105,10 +107,9 @@ module PointCloudImporter
     def parse_binary(io, header)
       points = []
       colors = []
-      vertex_count = header[:vertex_count]
+      vertex_count = header[:vertex_count] ? header[:vertex_count].to_i : 0
       properties = header[:properties]
-      decimation = (@decimation || 1).to_i
-      decimation = 1 if decimation < 1
+      import_step = @import_step
 
       stride = properties.sum { |property| bytesize(property[:type]) }
       vertex_buffer = ''.b
@@ -118,7 +119,7 @@ module PointCloudImporter
         data = io.read(stride)
         break unless data && data.length == stride
 
-        next unless (index % decimation).zero?
+        next unless (index % import_step).zero?
 
         vertex_buffer.replace(data)
         values = unpack_binary(vertex_buffer, properties)
@@ -129,6 +130,14 @@ module PointCloudImporter
 
       colors = nil if colors.empty?
       [points, colors, header[:metadata]]
+    end
+
+    def normalize_import_step(value)
+      step = value.to_i
+      step = 1 if step < 1
+      step
+    rescue StandardError
+      1
     end
 
     def interpret_vertex(values, properties)
