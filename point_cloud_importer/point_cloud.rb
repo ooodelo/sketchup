@@ -31,6 +31,7 @@ module PointCloudImporter
       @display_points = nil
       @display_colors = nil
       @spatial_index = nil
+      @inference_group = nil
       compute_bounds!
       build_display_cache!
     end
@@ -39,6 +40,7 @@ module PointCloudImporter
       @display_points = nil
       @display_colors = nil
       @spatial_index = nil
+      remove_inference_guides!
     end
 
     def visible?
@@ -70,6 +72,7 @@ module PointCloudImporter
       settings[:density] = @display_density
       settings.save!
       build_display_cache!
+      refresh_inference_guides!
     end
 
     def density
@@ -88,6 +91,7 @@ module PointCloudImporter
       settings[:max_display_points] = @max_display_points
       settings.save!
       build_display_cache!
+      refresh_inference_guides!
     end
 
     def draw(view)
@@ -123,9 +127,99 @@ module PointCloudImporter
       @metadata.dup
     end
 
+    def inference_enabled?
+      valid = @inference_group&.valid?
+      @inference_group = nil unless valid
+      !!@inference_group
+    end
+
+    def toggle_inference_guides!(model)
+      if inference_enabled?
+        remove_inference_guides!
+      else
+        ensure_inference_guides!(model)
+      end
+    end
+
+    def ensure_inference_guides!(model)
+      return unless model
+      return if inference_enabled?
+
+      build_display_cache! unless @display_points
+      return if @display_points.empty?
+
+      guides = sampled_guides
+      return if guides.empty?
+
+      model.start_operation('Point Cloud Guides', true)
+      begin
+        entities = model.entities
+        group = entities.add_group
+        group.name = "#{name} – направляющие"
+        guides.each { |point| group.entities.add_cpoint(point) }
+        group.hidden = !visible?
+        @inference_group = group
+        model.commit_operation
+      rescue StandardError
+        model.abort_operation
+        raise
+      end
+    end
+
+    def remove_inference_guides!
+      group = @inference_group
+      @inference_group = nil
+      return unless group&.valid?
+
+      model = group.model
+      if model
+        model.start_operation('Удалить направляющие облака', true)
+        begin
+          group.erase!
+          model.commit_operation
+        rescue StandardError
+          model.abort_operation
+          raise
+        end
+      end
+    end
+
+    def refresh_inference_guides!
+      return unless inference_enabled?
+
+      model = Sketchup.active_model
+      return unless model
+
+      remove_inference_guides!
+      ensure_inference_guides!(model)
+    end
+
+    def sync_inference_visibility!
+      return unless inference_enabled?
+
+      group = @inference_group
+      group.hidden = !visible? if group&.valid?
+    end
+
     private
 
     DRAW_BATCH_SIZE = 250_000
+    MAX_INFERENCE_GUIDES = 50_000
+
+    def sampled_guides
+      return [] unless @display_points
+
+      limit = [MAX_INFERENCE_GUIDES, @display_points.length].min
+      step = [(@display_points.length.to_f / limit).ceil, 1].max
+      guides = []
+      @display_points.each_with_index do |point, index|
+        next unless (index % step).zero?
+
+        guides << point
+        break if guides.length >= limit
+      end
+      guides
+    end
 
     def build_display_cache!
       step = compute_step

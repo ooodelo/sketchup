@@ -66,6 +66,7 @@
         <th>Точек</th>
         <th>Плотность</th>
         <th>Размер точки</th>
+        <th>Привязка</th>
         <th>Действия</th>
       </tr>
     </thead>
@@ -94,6 +95,10 @@
             </td>
             <td>
               <input type="range" min="1" max="10" step="1" value="${cloud.point_size}" data-index="${index}" class="point-size" />
+            </td>
+            <td>
+              <button class="inference" data-index="${index}">${cloud.inference ? 'Выключить' : 'Включить'}</button>
+              <div class="meta">${cloud.inference ? 'Созданы направляющие точки' : 'Нет направляющих'}</div>
             </td>
             <td>
               <button class="toggle" data-index="${index}">${cloud.visible ? 'Скрыть' : 'Показать'}</button>
@@ -142,6 +147,13 @@
         input.addEventListener('input', () => {
           const index = input.dataset.index;
           window.sketchup && window.sketchup.pci_point_size(index, input.value);
+        });
+      });
+
+      document.querySelectorAll('button.inference').forEach(button => {
+        button.addEventListener('click', () => {
+          const index = button.dataset.index;
+          window.sketchup && window.sketchup.pci_toggle_inference(index);
         });
       });
     }

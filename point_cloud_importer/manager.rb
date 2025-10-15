@@ -57,6 +57,16 @@ module PointCloudImporter
       return unless active_cloud
 
       active_cloud.visible = !active_cloud.visible?
+      active_cloud.sync_inference_visibility!
+      view.invalidate if view
+    end
+
+    def toggle_active_inference_guides
+      cloud = active_cloud
+      model = Sketchup.active_model
+      return unless cloud && model
+
+      cloud.toggle_inference_guides!(model)
       view.invalidate if view
     end
 

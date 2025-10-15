@@ -47,6 +47,11 @@ module PointCloudImporter
         end
         @commands[:toggle_visibility].tooltip = 'Переключить видимость активного облака'
 
+        @commands[:toggle_inference] = ::UI::Command.new('Магнит к точкам (вкл/выкл)') do
+          @manager.toggle_active_inference_guides
+        end
+        @commands[:toggle_inference].tooltip = 'Создать или удалить направляющие точки для привязки инструментов SketchUp'
+
         @commands[:measurement_tool] = ::UI::Command.new('Измерить расстояние в облаке') do
           Sketchup.active_model.select_tool(@manager.measurement_tool)
         end
@@ -64,6 +69,7 @@ module PointCloudImporter
         menu.add_item(@commands[:manage])
         menu.add_separator
         menu.add_item(@commands[:toggle_visibility])
+        menu.add_item(@commands[:toggle_inference])
         menu.add_item(@commands[:measurement_tool])
       end
 
@@ -73,6 +79,7 @@ module PointCloudImporter
         @toolbar = ::UI::Toolbar.new('Point Cloud Importer')
         @toolbar.add_item(@commands[:import])
         @toolbar.add_item(@commands[:toggle_visibility])
+        @toolbar.add_item(@commands[:toggle_inference])
         @toolbar.add_item(@commands[:measurement_tool])
         @toolbar.add_item(@commands[:manage])
         @toolbar.show

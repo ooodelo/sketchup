@@ -38,6 +38,7 @@ module PointCloudImporter
           next unless cloud
 
           cloud.visible = !cloud.visible?
+          cloud.sync_inference_visibility!
           @manager.view&.invalidate
           refresh
         end
@@ -65,6 +66,15 @@ module PointCloudImporter
           @manager.view&.invalidate
           refresh
         end
+        @dialog.add_action_callback('pci_toggle_inference') do |_, cloud_index|
+          cloud = @manager.clouds[cloud_index.to_i]
+          next unless cloud
+
+          model = Sketchup.active_model
+          cloud.toggle_inference_guides!(model) if model
+          @manager.view&.invalidate
+          refresh
+        end
         @dialog.add_action_callback('pci_remove') do |_, cloud_index|
           cloud = @manager.clouds[cloud_index.to_i]
           next unless cloud
@@ -84,7 +94,8 @@ module PointCloudImporter
               active: cloud == @manager.active_cloud,
               density: cloud.density,
               point_size: cloud.point_size,
-              metadata: cloud.metadata
+              metadata: cloud.metadata,
+              inference: cloud.inference_enabled?
             }
           end
         }
