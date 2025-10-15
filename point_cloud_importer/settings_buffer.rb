@@ -3,8 +3,6 @@
 require 'singleton'
 require 'thread'
 
-require_relative 'settings'
-
 module PointCloudImporter
   # Batches preference writes and flushes them on demand.
   class SettingsBuffer
@@ -23,7 +21,12 @@ module PointCloudImporter
     end
 
     def write_setting(key, value)
-      write(Settings::PREFERENCES_NAMESPACE, key, value)
+      namespace = if defined?(PointCloudImporter::Settings::PREFERENCES_NAMESPACE)
+                    PointCloudImporter::Settings::PREFERENCES_NAMESPACE
+                  else
+                    'PointCloudImporter::Preferences'
+                  end
+      write(namespace, key, value)
     end
 
     def commit!
