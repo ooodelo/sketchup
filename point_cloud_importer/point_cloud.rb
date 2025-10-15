@@ -1,5 +1,9 @@
 # frozen_string_literal: true
 
+require 'digest'
+require 'fileutils'
+require 'tmpdir'
+
 require_relative 'settings'
 require_relative 'spatial_index'
 
@@ -280,17 +284,70 @@ module PointCloudImporter
     def build_spatial_index!
       return if @spatial_index
 
-      sample_target = Settings.instance[:sampling_target]
-      sample_step = [(points.length.to_f / sample_target).ceil, 1].max
+      sample_points, sample_indices, digest, step = sampled_points_for_index
+      cache_path = spatial_index_cache_path(step, digest)
+
+      @spatial_index = load_spatial_index_cache(cache_path)
+      return if @spatial_index
+
+      @spatial_index = SpatialIndex.new(sample_points, sample_indices)
+      persist_spatial_index_cache(cache_path, @spatial_index)
+    end
+
+    def sampled_points_for_index
+      sample_target = Settings.instance[:sampling_target].to_i
+      sample_target = 1 if sample_target <= 0
+      step = sample_step_for_index(sample_target)
       sample_points = []
       sample_indices = []
+      digest = Digest::SHA256.new
+
       points.each_with_index do |point, index|
-        next unless (index % sample_step).zero?
+        next unless (index % step).zero?
 
         sample_points << point
         sample_indices << index
+        digest.update([point.x, point.y, point.z].pack('E3'))
+        digest.update([index].pack('Q<'))
       end
-      @spatial_index = SpatialIndex.new(sample_points, sample_indices)
+
+      [sample_points, sample_indices, digest.hexdigest, step]
+    end
+
+    def sample_step_for_index(sample_target)
+      [(points.length.to_f / sample_target).ceil, 1].max
+    end
+
+    def spatial_index_cache_directory
+      base = if defined?(Sketchup) && Sketchup.respond_to?(:temp_dir)
+               Sketchup.temp_dir
+             else
+               Dir.tmpdir
+             end
+      File.join(base, 'point_cloud_importer', 'spatial_index')
+    end
+
+    def spatial_index_cache_path(step, digest)
+      key = [SpatialIndex::CACHE_VERSION, points.length, step, digest].join('-')
+      File.join(spatial_index_cache_directory, "#{key}.sidx")
+    end
+
+    def load_spatial_index_cache(path)
+      return unless path && File.exist?(path)
+
+      payload = Marshal.load(File.binread(path))
+      SpatialIndex.deserialize(payload)
+    rescue StandardError
+      nil
+    end
+
+    def persist_spatial_index_cache(path, index)
+      payload = index.serialize
+      FileUtils.mkdir_p(File.dirname(path))
+      File.binwrite(path, Marshal.dump(payload))
+      index
+    rescue StandardError
+      index
     end
 
     def ensure_valid_style(style)
