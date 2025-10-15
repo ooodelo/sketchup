@@ -129,6 +129,63 @@ module PointCloudImporter
       points[result[:index]]
     end
 
+    def closest_point_to_ray(ray, view:, pixel_tolerance: 10)
+      build_spatial_index!
+      return unless @spatial_index
+
+      origin, direction = ray
+      return unless origin && direction
+
+      direction = direction.clone
+      return if direction.length.zero?
+      direction.normalize!
+
+      tolerance = compute_world_tolerance(view, pixel_tolerance)
+      tolerance = [tolerance, MIN_PICK_TOLERANCE].max
+
+      min_point, max_point = expanded_bounds(tolerance)
+      segment = ray_bounds_segment(origin, direction, min_point, max_point)
+      return unless segment
+
+      entry, exit = segment
+      return if exit < 0.0
+
+      entry = 0.0 if entry.negative?
+      segment_length = exit - entry
+
+      sample_count = if segment_length <= 0.0
+                       1
+                     else
+                       ((segment_length / tolerance).ceil + 1).clamp(1, MAX_PICK_SAMPLES)
+                     end
+
+      sample_step = sample_count > 1 ? (segment_length / (sample_count - 1)) : 0.0
+      search_radius = [tolerance, sample_step].max
+      tolerance_sq = tolerance * tolerance
+      best_point = nil
+      best_distance_sq = nil
+
+      sample_count.times do |index|
+        distance_along_ray = entry + (sample_step * index)
+        sample_point = origin.offset(direction, distance_along_ray)
+        candidate = @spatial_index.nearest(sample_point, max_distance: search_radius)
+        next unless candidate
+
+        point = points[candidate[:index]]
+        projection, distance_sq = projection_and_distance_sq(point, origin, direction)
+
+        next if projection < (entry - tolerance) || projection > (exit + tolerance)
+        next if distance_sq > tolerance_sq
+
+        if best_distance_sq.nil? || distance_sq < best_distance_sq
+          best_point = point
+          best_distance_sq = distance_sq
+        end
+      end
+
+      best_point
+    end
+
     def metadata
       @metadata.dup
     end
@@ -239,6 +296,8 @@ module PointCloudImporter
 
     DRAW_BATCH_SIZE = 250_000
     MAX_INFERENCE_GUIDES = 50_000
+    MIN_PICK_TOLERANCE = 1e-3
+    MAX_PICK_SAMPLES = 4_096
 
     def sampled_guides
       return [] unless @display_points
@@ -358,17 +417,71 @@ module PointCloudImporter
     def build_spatial_index!
       return if @spatial_index
 
-      sample_target = Settings.instance[:sampling_target]
-      sample_step = [(points.length.to_f / sample_target).ceil, 1].max
-      sample_points = []
-      sample_indices = []
-      points.each_with_index do |point, index|
-        next unless (index % sample_step).zero?
+      indices = (0...points.length).to_a
+      @spatial_index = SpatialIndex.new(points, indices)
+    end
 
-        sample_points << point
-        sample_indices << index
+    def compute_world_tolerance(view, pixel_tolerance)
+      return pixel_tolerance.to_f if view.nil?
+
+      candidate = view.pixels_to_model(pixel_tolerance.to_f, @bounding_box.center)
+      if candidate.nil? || candidate <= 0.0
+        diagonal = @bounding_box.diagonal.to_f
+        viewport = view.respond_to?(:vpwidth) ? view.vpwidth.to_f : 0.0
+        if diagonal.positive? && viewport.positive?
+          (diagonal / viewport) * pixel_tolerance.to_f
+        else
+          pixel_tolerance.to_f
+        end
+      else
+        candidate.to_f
       end
-      @spatial_index = SpatialIndex.new(sample_points, sample_indices)
+    rescue StandardError
+      pixel_tolerance.to_f
+    end
+
+    def expanded_bounds(distance)
+      min_point = @bounding_box.min
+      max_point = @bounding_box.max
+      expanded_min = Geom::Point3d.new(min_point.x - distance, min_point.y - distance, min_point.z - distance)
+      expanded_max = Geom::Point3d.new(max_point.x + distance, max_point.y + distance, max_point.z + distance)
+      [expanded_min, expanded_max]
+    end
+
+    def ray_bounds_segment(origin, direction, min_point, max_point)
+      t_min = -Float::INFINITY
+      t_max = Float::INFINITY
+
+      %i[x y z].each do |axis|
+        o = origin.public_send(axis)
+        d = direction.public_send(axis)
+        min_axis = min_point.public_send(axis)
+        max_axis = max_point.public_send(axis)
+
+        if d.abs < 1e-9
+          return nil if o < min_axis || o > max_axis
+          next
+        end
+
+        inv = 1.0 / d
+        t1 = (min_axis - o) * inv
+        t2 = (max_axis - o) * inv
+        t1, t2 = t2, t1 if t1 > t2
+
+        t_min = [t_min, t1].max
+        t_max = [t_max, t2].min
+        return nil if t_min > t_max
+      end
+
+      [t_min, t_max]
+    end
+
+    def projection_and_distance_sq(point, origin, direction)
+      to_point = point - origin
+      projection = to_point.dot(direction)
+      projection_point = origin.offset(direction, projection)
+      diff = point - projection_point
+      [projection, diff.dot(diff)]
     end
 
     def ensure_valid_style(style)

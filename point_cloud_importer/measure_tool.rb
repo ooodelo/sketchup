@@ -8,16 +8,19 @@ module PointCloudImporter
 
     def initialize(manager)
       @manager = manager
+      @measurements = []
       reset!
     end
 
     def activate
       reset!
+      @measurements.clear
       Sketchup.status_text = 'Кликните по первой точке облака.'
     end
 
     def deactivate(view)
       reset!
+      @measurements.clear
       view.invalidate if view
       Sketchup.status_text = ''
     end
@@ -29,26 +32,29 @@ module PointCloudImporter
       case @state
       when STATE_FIRST
         @first_point = point
+        @second_point = nil
         @state = STATE_SECOND
         Sketchup.status_text = 'Выберите вторую точку.'
       when STATE_SECOND
         @second_point = point
-        @state = STATE_FIRST
-        display_measurement(view)
+        finalize_measurement(view)
         Sketchup.status_text = 'Измерение завершено. Выберите новую первую точку.'
       end
       view.invalidate
     end
 
     def draw(view)
-      return unless @first_point
-
       view.drawing_color = Sketchup::Color.new(255, 128, 0)
       view.line_width = 2
 
+      @measurements.each do |measurement|
+        draw_measurement(view, measurement[:start], measurement[:finish], measurement[:label])
+      end
+
+      return unless @first_point
+
       if @second_point
-        view.draw_polyline(@first_point, @second_point)
-        draw_dimension(view)
+        draw_measurement(view, @first_point, @second_point, formatted_distance(@first_point, @second_point))
       else
         style = PointCloud.style_constant(:round)
         options = { size: 6 }
@@ -65,19 +71,29 @@ module PointCloudImporter
       @second_point = nil
     end
 
-    def display_measurement(view)
+    def finalize_measurement(view)
       return unless @first_point && @second_point
 
-      distance = @first_point.distance(@second_point)
-      UI.messagebox("Расстояние: #{Sketchup.format_length(distance)}")
+      label = formatted_distance(@first_point, @second_point)
+      @measurements << { start: @first_point, finish: @second_point, label: label }
+      UI.messagebox("Расстояние: #{label}")
+      reset!
+      view.invalidate if view
     end
 
-    def draw_dimension(view)
-      mid_point = Geom.linear_combination(0.5, @first_point, 0.5, @second_point)
+    def draw_measurement(view, start_point, end_point, label)
+      view.draw_polyline(start_point, end_point)
+      draw_dimension(view, start_point, end_point, label)
+    end
+
+    def draw_dimension(view, start_point, end_point, label)
+      mid_point = Geom.linear_combination(0.5, start_point, 0.5, end_point)
       screen = view.screen_coords(mid_point)
-      distance = @first_point.distance(@second_point)
-      label = Sketchup.format_length(distance)
       view.draw_text(screen, label, size: 14, color: Sketchup::Color.new(255, 255, 255))
+    end
+
+    def formatted_distance(first_point, second_point)
+      Sketchup.format_length(first_point.distance(second_point))
     end
   end
 end
