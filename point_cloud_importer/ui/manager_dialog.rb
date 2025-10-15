@@ -1,4 +1,5 @@
 # frozen_string_literal: true
+# encoding: utf-8
 
 require 'json'
 require_relative '../settings'
@@ -21,7 +22,8 @@ module PointCloudImporter
           height: settings[:dialog_height]
         )
         register_callbacks
-        @dialog.set_file(TEMPLATE)
+        html = File.read(TEMPLATE, encoding: 'UTF-8')
+        @dialog.set_html(html)
       end
 
       def show
