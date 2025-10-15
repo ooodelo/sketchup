@@ -17,6 +17,8 @@ module PointCloudImporter
     }.freeze
 
     def initialize(name:, points:, colors: nil, metadata: {})
+      raise ArgumentError, 'Point cloud must contain at least one point.' if points.nil? || points.empty?
+
       @name = name
       @points = points
       @colors = colors
@@ -95,6 +97,8 @@ module PointCloudImporter
     end
 
     def draw(view)
+      return if points.empty?
+
       build_display_cache! unless @display_points
       return if @display_points.empty?
 
@@ -272,6 +276,8 @@ module PointCloudImporter
     end
 
     def compute_bounds!
+      return @bounding_box = nil if points.empty?
+
       bbox = Geom::BoundingBox.new
       points.each { |pt| bbox.add(pt) }
       @bounding_box = bbox

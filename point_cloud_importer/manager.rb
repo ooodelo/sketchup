@@ -86,11 +86,14 @@ module PointCloudImporter
       cloud = active_cloud
       return unless cloud&.visible?
 
+      bbox = cloud.bounding_box
+      return unless bbox
+
       ray = view.pickray(x, y)
       return unless ray
 
       plane_normal = view.camera.direction
-      plane_point = cloud.bounding_box.center
+      plane_point = bbox.center
       plane = [plane_point, plane_normal]
       projection = Geom.intersect_line_plane(ray, plane)
       return unless projection
