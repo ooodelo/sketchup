@@ -119,16 +119,18 @@ module PointCloudImporter
       view.drawing_color = nil
       view.line_width = 0
       style = self.class.style_constant(@point_style)
-      visible_batches(view) do |points_batch, colors_batch|
-        if colors_batch
+      visible_batches(view) do |start_index, end_index|
+        points_slice = @display_points.slice(start_index..end_index)
+        if @display_colors
+          colors_slice = @display_colors.slice(start_index..end_index)
           draw_options = { size: @point_size }
           draw_options[:style] = style if style
-          draw_options[:colors] = colors_batch
-          view.draw_points(points_batch, **draw_options)
+          draw_options[:colors] = colors_slice
+          view.draw_points(points_slice, **draw_options)
         else
           draw_options = { size: @point_size }
           draw_options[:style] = style if style
-          view.draw_points(points_batch, **draw_options)
+          view.draw_points(points_slice, **draw_options)
         end
       end
     end
@@ -382,58 +384,71 @@ module PointCloudImporter
     def batches
       return enum_for(:batches) unless block_given?
 
-      batch_points = []
-      batch_colors = @display_colors ? [] : nil
-      @display_points.each_with_index do |point, idx|
-        batch_points << point
-        batch_colors << @display_colors[idx] if batch_colors
-        next unless batch_points.length >= DRAW_BATCH_SIZE
+      start_index = 0
+      total_points = @display_points.length
 
-        yield(batch_points, batch_colors)
-        batch_points = []
-        batch_colors = [] if batch_colors
+      while start_index < total_points
+        end_index = [start_index + DRAW_BATCH_SIZE - 1, total_points - 1].min
+        yield(start_index, end_index)
+        start_index = end_index + 1
       end
-      return if batch_points.empty?
-
-      yield(batch_points, batch_colors)
     end
 
     def visible_batches(view)
       return enum_for(:visible_batches, view) unless block_given?
 
       unless @octree
-        batches do |points_batch, colors_batch|
-          yield(points_batch, colors_batch)
+        batches do |start_index, end_index|
+          yield(start_index, end_index)
         end
         return
       end
 
       frustum = ViewingFrustum.from_view(view)
       if frustum.nil?
-        batches do |points_batch, colors_batch|
-          yield(points_batch, colors_batch)
+        batches do |start_index, end_index|
+          yield(start_index, end_index)
         end
         return
       end
 
-      batch_points = []
-      batch_colors = @display_colors ? [] : nil
-
+      index_batch = []
       @octree.each_leaf_intersecting(frustum) do |node|
         node.indices.each do |index|
-          batch_points << @display_points[index]
-          batch_colors << @display_colors[index] if batch_colors
-          next unless batch_points.length >= DRAW_BATCH_SIZE
+          index_batch << index
+          next unless index_batch.length >= DRAW_BATCH_SIZE
 
-          yield(batch_points, batch_colors)
-          batch_points = []
-          batch_colors = [] if batch_colors
+          flush_index_batch(index_batch) do |start_index, end_index|
+            yield(start_index, end_index)
+          end
         end
       end
 
-      return if batch_points.empty?
+      flush_index_batch(index_batch) do |start_index, end_index|
+        yield(start_index, end_index)
+      end
+    end
 
-      yield(batch_points, batch_colors)
+    def flush_index_batch(indices)
+      return if indices.empty?
+
+      indices.sort!
+      range_start = indices.first
+      previous_index = range_start
+
+      indices[1..-1]&.each do |index|
+        if index == previous_index + 1
+          previous_index = index
+          next
+        end
+
+        yield(range_start, previous_index)
+        range_start = index
+        previous_index = index
+      end
+
+      yield(range_start, previous_index)
+      indices.clear
     end
 
     def compute_bounds!
