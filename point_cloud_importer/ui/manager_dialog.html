@@ -17,6 +17,13 @@
       margin-bottom: 12px;
     }
 
+    .toolbar {
+      display: flex;
+      justify-content: flex-end;
+      margin-bottom: 12px;
+      gap: 8px;
+    }
+
     table {
       width: 100%;
       border-collapse: collapse;
@@ -59,6 +66,9 @@
 </head>
 <body>
   <h1>Импортированные облака</h1>
+  <div class="toolbar">
+    <button id="apply-button">Применить</button>
+  </div>
   <table id="cloud-table">
     <thead>
       <tr>
@@ -74,6 +84,14 @@
   </table>
 
   <script>
+    function debounce(fn, delay) {
+      let timer;
+      return (...args) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn(...args), delay);
+      };
+    }
+
     window.pci = {
       update(payload) {
         const tbody = document.querySelector('#cloud-table tbody');
@@ -137,16 +155,31 @@
       });
 
       document.querySelectorAll('input.density').forEach(input => {
-        input.addEventListener('input', () => {
+        const emit = debounce(value => {
           const index = input.dataset.index;
-          window.sketchup && window.sketchup.pci_density(index, input.value);
+          window.sketchup && window.sketchup.pci_density(index, value);
+        }, 500);
+
+        const meta = input.parentElement.querySelector('.meta');
+
+        input.addEventListener('input', () => {
+          const value = input.value;
+          if (meta) {
+            const numeric = Number.parseFloat(value);
+            meta.textContent = Number.isFinite(numeric) ? `${(numeric * 100).toFixed(0)}%` : meta.textContent;
+          }
+          emit(value);
         });
       });
 
       document.querySelectorAll('input.point-size').forEach(input => {
-        input.addEventListener('input', () => {
+        const emit = debounce(value => {
           const index = input.dataset.index;
-          window.sketchup && window.sketchup.pci_point_size(index, input.value);
+          window.sketchup && window.sketchup.pci_point_size(index, value);
+        }, 500);
+
+        input.addEventListener('input', () => {
+          emit(input.value);
         });
       });
 
@@ -160,6 +193,13 @@
 
     document.addEventListener('DOMContentLoaded', () => {
       window.sketchup && window.sketchup.pci_ready();
+
+      const applyButton = document.getElementById('apply-button');
+      if (applyButton) {
+        applyButton.addEventListener('click', () => {
+          window.sketchup && window.sketchup.pci_apply_preferences();
+        });
+      }
     });
   </script>
 </body>

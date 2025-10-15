@@ -2,6 +2,7 @@
 
 require 'json'
 require_relative '../settings'
+require_relative '../settings_buffer'
 
 module PointCloudImporter
   module UI
@@ -22,6 +23,7 @@ module PointCloudImporter
         )
         register_callbacks
         @dialog.set_file(TEMPLATE)
+        @dialog.set_on_closed { SettingsBuffer.instance.commit! }
       end
 
       def show
@@ -81,6 +83,9 @@ module PointCloudImporter
 
           @manager.remove_cloud(cloud)
           refresh
+        end
+        @dialog.add_action_callback('pci_apply_preferences') do
+          SettingsBuffer.instance.commit!
         end
       end
 
