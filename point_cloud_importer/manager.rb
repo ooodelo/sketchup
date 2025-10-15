@@ -44,6 +44,7 @@ module PointCloudImporter
       end
 
       removed_cloud.dispose!
+      warn_unless_disposed(removed_cloud)
       view.invalidate if view
     end
 
@@ -63,7 +64,10 @@ module PointCloudImporter
         end
       end
 
-      clouds_to_dispose.each(&:dispose!)
+      clouds_to_dispose.each do |cloud|
+        cloud.dispose!
+        warn_unless_disposed(cloud)
+      end
 
       if overlay_to_remove
         model.model_overlays.remove(overlay_to_remove)
@@ -121,6 +125,16 @@ module PointCloudImporter
 
     def measurement_tool
       MeasureTool.new(self)
+    end
+
+    private
+
+    def warn_unless_disposed(cloud)
+      return if cloud.disposed?
+
+      warn("[PointCloudImporter] Облако '#{cloud.name}' не полностью освобождено после dispose!")
+    rescue StandardError => e
+      warn("[PointCloudImporter] Не удалось проверить состояние облака '#{cloud.name}': #{e.message}")
     end
   end
 end

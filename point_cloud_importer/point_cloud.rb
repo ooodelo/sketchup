@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'weakref'
+
 require_relative 'settings'
 require_relative 'settings_buffer'
 require_relative 'spatial_index'
@@ -38,15 +40,28 @@ module PointCloudImporter
       @octree = nil
       compute_bounds!
       build_display_cache!
+
+      @finalizer_info = self.class.register_finalizer(self,
+                                                      name: @name,
+                                                      points: @points,
+                                                      colors: @colors)
     end
 
     def dispose!
+      clear_cache!
+      remove_inference_guides!
+      @points = nil
+      @colors = nil
+      @bounding_box = nil
+      mark_finalizer_disposed!
+    end
+
+    def clear_cache!
       @display_points = nil
       @display_colors = nil
       @display_index_lookup = nil
       @spatial_index = nil
       @octree = nil
-      remove_inference_guides!
     end
 
     def visible?
@@ -239,6 +254,7 @@ module PointCloudImporter
         model.start_operation('Удалить направляющие облака', true)
         begin
           group.erase!
+          warn_unless_deleted(group)
           model.commit_operation
         rescue StandardError
           model.abort_operation
@@ -290,6 +306,21 @@ module PointCloudImporter
       end
 
       update_octree_samples!(updates)
+    end
+
+    def caches_cleared?
+      @display_points.nil? &&
+        @display_colors.nil? &&
+        @display_index_lookup.nil? &&
+        @spatial_index.nil? &&
+        @octree.nil?
+    end
+
+    def disposed?
+      @points.nil? &&
+        @colors.nil? &&
+        caches_cleared? &&
+        @bounding_box.nil?
     end
 
     private
@@ -507,6 +538,20 @@ module PointCloudImporter
       else
         @octree = nil
       end
+    end
+
+    def mark_finalizer_disposed!
+      return unless @finalizer_info
+
+      @finalizer_info[:disposed] = true
+    end
+
+    def warn_unless_deleted(group)
+      return if group.deleted?
+
+      warn("[PointCloudImporter] Группа направляющих для '#{@name}' не была удалена полностью")
+    rescue StandardError => e
+      warn("[PointCloudImporter] Ошибка при проверке удаления направляющих для '#{@name}': #{e.message}")
     end
 
     def update_octree_samples!(changes)
@@ -746,6 +791,52 @@ module PointCloudImporter
 
       def default_point_style
         available_point_styles.first || :square
+      end
+
+      def register_finalizer(instance, name:, points:, colors:)
+        info = {
+          name: name,
+          disposed: false,
+          points_ref: points ? WeakRef.new(points) : nil,
+          colors_ref: colors ? WeakRef.new(colors) : nil
+        }
+
+        ObjectSpace.define_finalizer(instance, finalizer_proc(info))
+        info
+      end
+
+      def finalizer_proc(info)
+        proc do |_object_id|
+          begin
+            lingering = lingering_references(info)
+            disposed = info[:disposed]
+            name = info[:name]
+
+            if !disposed
+              detail = lingering.empty? ? 'без остаточных ссылок' : "остатки: #{lingering.join(', ')}"
+              warn("[PointCloudImporter] PointCloud '#{name}' уничтожен GC без вызова dispose! (#{detail})")
+            elsif lingering.any?
+              warn("[PointCloudImporter] PointCloud '#{name}' уничтожен GC с оставшимися ссылками: #{lingering.join(', ')}")
+            end
+          rescue StandardError => e
+            warn("[PointCloudImporter] Ошибка финализатора для облака '#{info[:name]}': #{e.message}")
+          end
+        end
+      end
+
+      def lingering_references(info)
+        [].tap do |refs|
+          refs << 'points' if weakref_alive?(info[:points_ref])
+          refs << 'colors' if weakref_alive?(info[:colors_ref])
+        end
+      end
+
+      def weakref_alive?(weakref)
+        return false unless weakref
+
+        weakref.weakref_alive?
+      rescue RefError
+        false
       end
     end
   end
