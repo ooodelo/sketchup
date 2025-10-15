@@ -8,6 +8,8 @@ module PointCloudImporter
     UnsupportedFormat = Class.new(StandardError)
     Cancelled = Class.new(StandardError)
 
+    DEFAULT_CHUNK_SIZE = 100_000
+
 
     TYPE_MAP = {
       'char' => 'c',
@@ -48,32 +50,59 @@ module PointCloudImporter
     GREEN_PROPERTY_NAMES = %w[green diffuse_green g].freeze
     BLUE_PROPERTY_NAMES = %w[blue diffuse_blue b].freeze
 
-    attr_reader :path, :total_vertex_count
+    attr_reader :path, :total_vertex_count, :metadata
 
     def initialize(path, progress_callback: nil, cancelled_callback: nil)
       @path = path
       @progress_callback = progress_callback
       @cancelled_callback = cancelled_callback
       @total_vertex_count = 0
+      @metadata = {}
     end
 
-    def parse
+    def parse(chunk_size: DEFAULT_CHUNK_SIZE, &block)
+      chunk_size = [chunk_size.to_i, 1].max
+
+      collector_points = []
+      collector_colors = []
+      has_colors = false
+
+      emitter = if block_given?
+                  block
+                else
+                  lambda do |points_chunk, colors_chunk, _processed|
+                    collector_points.concat(points_chunk)
+                    if colors_chunk
+                      has_colors = true
+                      collector_colors.concat(colors_chunk)
+                    end
+                  end
+                end
+
       File.open(path, 'rb') do |io|
         header = parse_header(io)
         @total_vertex_count = header[:vertex_count] ? header[:vertex_count].to_i : 0
+        @metadata = header[:metadata] || {}
 
         validate_header!(header)
 
         case header[:format]
         when :ascii
-          parse_ascii(io, header)
+          parse_ascii(io, header, chunk_size, &emitter)
         when :binary_little
-          parse_binary(io, header)
+          parse_binary(io, header, chunk_size, &emitter)
         when :binary_big
-          parse_binary_big(io, header)
+          parse_binary_big(io, header, chunk_size, &emitter)
         else
           raise UnsupportedFormat, 'Только ASCII, binary_little_endian и binary_big_endian PLY поддерживаются.'
         end
+      end
+
+      if block_given?
+        @metadata
+      else
+        colors_result = has_colors ? collector_colors : nil
+        [collector_points, colors_result, @metadata]
       end
     end
 
@@ -120,12 +149,14 @@ module PointCloudImporter
       header
     end
 
-    def parse_ascii(io, header)
-      points = []
-      colors = []
+    def parse_ascii(io, header, chunk_size, &block)
       vertex_count = header[:vertex_count] ? header[:vertex_count].to_i : 0
       property_index_by_name = header[:property_index_by_name]
       color_indices = color_property_indices(property_index_by_name)
+
+      points_chunk = []
+      colors_chunk = color_indices ? [] : nil
+      processed = 0
 
       vertex_count.times do |index|
         check_cancelled!
@@ -135,17 +166,29 @@ module PointCloudImporter
 
         values = line.split
         point, color = interpret_vertex(values, property_index_by_name, color_indices)
-        points << point
-        colors << color if color
+        points_chunk << point
+        colors_chunk << color if colors_chunk
+        processed += 1
+
+        next unless points_chunk.length >= chunk_size
+
+        emit_chunk(points_chunk, colors_chunk, processed, block)
+        points_chunk = []
+        colors_chunk = color_indices ? [] : nil
       end
 
-      colors = nil if colors.empty?
-      [points, colors, header[:metadata]]
+      emit_chunk(points_chunk, colors_chunk, processed, block)
     end
 
-    def parse_binary(io, header)
-      points = []
-      colors = []
+    def parse_binary(io, header, chunk_size, &block)
+      parse_binary_with_endian(io, header, :little, chunk_size, &block)
+    end
+
+    def parse_binary_big(io, header, chunk_size, &block)
+      parse_binary_with_endian(io, header, :big, chunk_size, &block)
+    end
+
+    def parse_binary_with_endian(io, header, endian, chunk_size, &block)
       vertex_count = header[:vertex_count] ? header[:vertex_count].to_i : 0
       properties = header[:properties]
       property_index_by_name = header[:property_index_by_name]
@@ -154,6 +197,10 @@ module PointCloudImporter
       stride = properties.sum { |property| bytesize(property[:type]) }
       vertex_buffer = ''.b
 
+      points_chunk = []
+      colors_chunk = color_indices ? [] : nil
+      processed = 0
+
       vertex_count.times do |index|
         check_cancelled!
         report(index, vertex_count)
@@ -161,42 +208,29 @@ module PointCloudImporter
         break unless data && data.length == stride
 
         vertex_buffer.replace(data)
-        values = unpack_binary(vertex_buffer, properties, endian: :little)
+        values = unpack_binary(vertex_buffer, properties, endian: endian)
         point, color = interpret_vertex(values, property_index_by_name, color_indices)
-        points << point
-        colors << color if color
+        points_chunk << point
+        colors_chunk << color if colors_chunk
+        processed += 1
+
+        next unless points_chunk.length >= chunk_size
+
+        emit_chunk(points_chunk, colors_chunk, processed, block)
+        points_chunk = []
+        colors_chunk = color_indices ? [] : nil
       end
 
-      colors = nil if colors.empty?
-      [points, colors, header[:metadata]]
+      emit_chunk(points_chunk, colors_chunk, processed, block)
     end
 
-    def parse_binary_big(io, header)
-      points = []
-      colors = []
-      vertex_count = header[:vertex_count] ? header[:vertex_count].to_i : 0
-      properties = header[:properties]
-      property_index_by_name = header[:property_index_by_name]
-      color_indices = color_property_indices(property_index_by_name)
+    def emit_chunk(points_chunk, colors_chunk, processed, block)
+      return if points_chunk.nil? || points_chunk.empty?
 
-      stride = properties.sum { |property| bytesize(property[:type]) }
-      vertex_buffer = ''.b
+      colors_arg = colors_chunk
+      colors_arg = nil if colors_arg.is_a?(Array) && colors_arg.empty?
 
-      vertex_count.times do |index|
-        check_cancelled!
-        report(index, vertex_count)
-        data = io.read(stride)
-        break unless data && data.length == stride
-
-        vertex_buffer.replace(data)
-        values = unpack_binary(vertex_buffer, properties, endian: :big)
-        point, color = interpret_vertex(values, property_index_by_name, color_indices)
-        points << point
-        colors << color if color
-      end
-
-      colors = nil if colors.empty?
-      [points, colors, header[:metadata]]
+      block&.call(points_chunk, colors_arg, processed)
     end
 
     def interpret_vertex(values, property_index_by_name, color_indices)
@@ -284,7 +318,7 @@ module PointCloudImporter
       return unless (current % step).zero? || current == total - 1
 
       fraction = (current.to_f / [total - 1, 1].max)
-      @progress_callback.call(fraction, "#{current + 1}/#{total}")
+      @progress_callback.call(fraction, nil)
     end
   end
 end

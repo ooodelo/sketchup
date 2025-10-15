@@ -61,15 +61,47 @@ module PointCloudImporter
             progress_callback: job.progress_callback,
             cancelled_callback: -> { job.cancel_requested? }
           )
-          points, colors, metadata = parser.parse
+
+          metadata = {}
+          cloud = nil
+          processed_points = 0
+          total_vertices = 0
+
+          metadata = parser.parse(chunk_size: PlyParser::DEFAULT_CHUNK_SIZE) do |points_chunk, colors_chunk, processed|
+            next if job.cancel_requested?
+
+            cloud ||= begin
+              name = File.basename(job.path, '.*')
+              created = PointCloud.new(name: name, metadata: parser.metadata || {})
+              job.cloud = created
+              created
+            end
+
+            cloud.append_points!(points_chunk, colors_chunk)
+            processed_points = processed
+            total_vertices = parser.total_vertex_count.to_i
+            total_vertices = processed_points if total_vertices.zero?
+
+            progress_fraction = total_vertices.positive? ? (processed_points.to_f / total_vertices) : 0.0
+            job.update_progress(progress_fraction, format_progress_message(processed_points, total_vertices))
+          end
+
+          cloud ||= begin
+            name = File.basename(job.path, '.*')
+            created = PointCloud.new(name: name, metadata: parser.metadata || metadata)
+            job.cloud = created
+            created
+          end
+
+          cloud.update_metadata!(metadata)
+
           if job.cancel_requested?
             job.mark_cancelled!
           else
             total_vertices = parser.total_vertex_count.to_i
-            total_vertices = points.length if total_vertices.zero?
+            total_vertices = cloud.points.length if total_vertices.zero?
             job.complete!(
-              points: points,
-              colors: colors,
+              cloud: cloud,
               metadata: metadata,
               duration: Time.now - start_time,
               total_vertices: total_vertices
@@ -89,6 +121,13 @@ module PointCloudImporter
       timer_id = nil
       timer_id = UI.start_timer(0.1, repeat: true) do
         progress_dialog.update
+        unless job.cloud_added?
+          cloud = job.cloud
+          if cloud && cloud.points && cloud.points.length.positive?
+            @manager.add_cloud(cloud)
+            job.mark_cloud_added!
+          end
+        end
         next unless job.finished?
 
         UI.stop_timer(timer_id) if timer_id
@@ -103,9 +142,11 @@ module PointCloudImporter
       when :completed
         create_cloud(job)
       when :failed
+        cleanup_partial_cloud(job)
         @last_result = nil
         UI.messagebox("Ошибка импорта: #{job.error.message}") if job.error
       when :cancelled
+        cleanup_partial_cloud(job)
         @last_result = nil
         UI.messagebox('Импорт отменен пользователем.')
       else
@@ -115,22 +156,24 @@ module PointCloudImporter
 
     def create_cloud(job)
       data = job.result
-      points = data[:points]
-      colors = data[:colors]
+      cloud = data[:cloud]
       metadata = data[:metadata]
       duration = data[:duration]
       total_vertices = data[:total_vertices]
 
-      raise ArgumentError, 'PLY файл не содержит точек' if points.nil? || points.empty?
+      raise ArgumentError, 'PLY файл не содержит точек' unless cloud && cloud.points && cloud.points.length.positive?
 
-      name = File.basename(job.path, '.*')
-      cloud = PointCloud.new(name: name, points: points, colors: colors, metadata: metadata)
+      cloud.update_metadata!(metadata)
       apply_visual_options(cloud, job.options)
 
-      @manager.add_cloud(cloud)
+      unless job.cloud_added?
+        @manager.add_cloud(cloud)
+        job.mark_cloud_added!
+      end
+
       UI.messagebox(
         "Импорт завершен за #{format('%.2f', duration)} сек. " \
-        "Импортировано #{points.length} из #{total_vertices} точек"
+        "Импортировано #{format_point_count(cloud.points.length)} из #{format_point_count(total_vertices)} точек"
       )
       result = Result.new(cloud, duration)
       @last_result = result
@@ -212,6 +255,46 @@ module PointCloudImporter
       return labels unless labels.empty?
 
       [STYLE_LABELS.fetch(PointCloud.default_point_style, 'квадрат')]
+    end
+
+    def format_progress_message(processed, total)
+      total = [total.to_i, processed.to_i].max
+      return "Загружено #{format_point_count(processed)} точек" if total <= 0
+
+      percent = if total.positive?
+                  ((processed.to_f / total) * 100).round
+                else
+                  0
+                end
+      "Загружено #{format_point_count(processed)} из #{format_point_count(total)} точек (#{percent}%)"
+    end
+
+    def format_point_count(value)
+      count = value.to_i
+      if count >= 1_000_000
+        formatted = format('%.1fM', count / 1_000_000.0)
+        formatted.sub(/\.0M\z/, 'M')
+      elsif count >= 1_000
+        formatted = format('%.1fK', count / 1_000.0)
+        formatted.sub(/\.0K\z/, 'K')
+      else
+        count.to_s
+      end
+    end
+
+    def cleanup_partial_cloud(job)
+      cloud = job.cloud
+      return unless cloud
+
+      if job.cloud_added?
+        @manager.remove_cloud(cloud)
+      else
+        cloud.dispose!
+      end
+    rescue StandardError
+      # Best effort cleanup; ignore errors to avoid masking original failure.
+    ensure
+      job.cloud = nil
     end
 
   end
