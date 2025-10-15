@@ -23,6 +23,7 @@ module PointCloudImporter
     def initialize(name:, points:, colors: nil, metadata: {})
       @name = name
       @points = points
+      raise ArgumentError, 'Points array cannot be empty' if @points.nil? || @points.empty?
       @colors = colors
       @metadata = metadata
       @visible = true
@@ -117,7 +118,7 @@ module PointCloudImporter
 
     def draw(view)
       build_display_cache! unless @display_points
-      return if @display_points.empty?
+      return if @display_points.nil? || @display_points.empty?
 
       view.drawing_color = nil
       view.line_width = 0
@@ -440,6 +441,8 @@ module PointCloudImporter
     end
 
     def compute_bounds!
+      return unless points && !points.empty?
+
       bbox = Geom::BoundingBox.new
       points.each { |pt| bbox.add(pt) }
       @bounding_box = bbox

@@ -30,6 +30,7 @@ module PointCloudImporter
       start_time = Time.now
       parser = PlyParser.new(path, import_step: options[:import_step], progress_callback: method(:report_progress))
       points, colors, metadata = parser.parse
+      raise ArgumentError, 'PLY файл не содержит точек' if points.nil? || points.empty?
 
       name = File.basename(path, '.*')
       cloud = PointCloud.new(name: name, points: points, colors: colors, metadata: metadata)
