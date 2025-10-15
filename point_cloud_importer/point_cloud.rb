@@ -3,7 +3,6 @@
 require 'weakref'
 
 require_relative 'settings'
-require_relative 'settings_buffer'
 require_relative 'spatial_index'
 require_relative 'octree'
 
@@ -73,7 +72,6 @@ module PointCloudImporter
       @point_size = size.to_i.clamp(1, 10)
       settings = Settings.instance
       settings[:point_size] = @point_size
-      SettingsBuffer.instance.write_setting(:point_size, @point_size)
       invalidate_display_cache!
     end
 
@@ -92,7 +90,6 @@ module PointCloudImporter
       @display_density = value
       settings = Settings.instance
       settings[:density] = @display_density
-      SettingsBuffer.instance.write_setting(:density, @display_density)
       build_display_cache!
       refresh_inference_guides!
     end
@@ -111,7 +108,6 @@ module PointCloudImporter
       @max_display_points = candidate
       settings = Settings.instance
       settings[:max_display_points] = @max_display_points
-      SettingsBuffer.instance.write_setting(:max_display_points, @max_display_points)
       build_display_cache!
       refresh_inference_guides!
     end
@@ -532,7 +528,6 @@ module PointCloudImporter
       return if settings[:point_style] == style
 
       settings[:point_style] = style
-      settings.save!(:point_style)
     end
 
     def build_octree_from_display_cache!

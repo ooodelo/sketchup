@@ -2,6 +2,8 @@
 
 require 'singleton'
 
+require_relative 'settings_buffer'
+
 module PointCloudImporter
   # Simple configuration holder with SketchUp preference persistence.
   class Settings
@@ -30,7 +32,9 @@ module PointCloudImporter
     end
 
     def []=(key, value)
+      key = key.to_sym
       values[key] = value
+      SettingsBuffer.instance.write_setting(key, value)
     end
 
     def load!
@@ -51,12 +55,16 @@ module PointCloudImporter
       end
     end
 
-    def save!(keys = nil)
-      keys = Array(keys || @values.keys)
-      keys.each do |key|
-        next unless @values.key?(key)
+    def save!(keys = nil, immediate: false)
+      keys = Array(keys || @values.keys).map(&:to_sym)
+      if immediate
+        keys.each do |key|
+          next unless @values.key?(key)
 
-        Sketchup.write_default(preferences_namespace, key.to_s, @values[key])
+          Sketchup.write_default(preferences_namespace, key.to_s, @values[key])
+        end
+      else
+        SettingsBuffer.instance.commit!
       end
     end
 
