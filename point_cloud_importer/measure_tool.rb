@@ -26,21 +26,30 @@ module PointCloudImporter
     end
 
     def onLButtonDown(flags, x, y, view)
-      point = @manager.pick_point(view, x, y)
-      return unless point
-
       case @state
       when STATE_FIRST
+        point = @manager.pick_point(view, x, y)
+        return unless point
+
         @first_point = point
         @second_point = nil
         @state = STATE_SECOND
         Sketchup.status_text = 'Выберите вторую точку.'
+        view.invalidate
       when STATE_SECOND
+        # Сбросить предыдущую точку, чтобы убрать старое превью измерения,
+        # пока пользователь выбирает новую точку.
+        @second_point = nil
+        view.invalidate
+
+        point = @manager.pick_point(view, x, y)
+        return unless point
+
         @second_point = point
         finalize_measurement(view)
         Sketchup.status_text = 'Измерение завершено. Выберите новую первую точку.'
+        view.invalidate
       end
-      view.invalidate
     end
 
     def draw(view)
