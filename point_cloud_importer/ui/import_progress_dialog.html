@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Импорт облака точек</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 20px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background-color: #1f1f1f;
+      color: #f5f5f5;
+    }
+
+    h1 {
+      font-size: 18px;
+      margin-top: 0;
+      margin-bottom: 16px;
+    }
+
+    .message {
+      margin-bottom: 12px;
+      min-height: 20px;
+      color: #dddddd;
+    }
+
+    .progress-bar {
+      width: 100%;
+      height: 12px;
+      background-color: #333;
+      border-radius: 6px;
+      overflow: hidden;
+      margin-bottom: 16px;
+    }
+
+    .progress-bar span {
+      display: block;
+      height: 100%;
+      width: 0;
+      background: linear-gradient(90deg, #ff9800, #ffc107);
+      transition: width 0.15s ease-out;
+    }
+
+    button {
+      padding: 8px 16px;
+      font-size: 14px;
+      border: none;
+      border-radius: 4px;
+      background-color: #ff5722;
+      color: #fff;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      background-color: #555;
+      cursor: default;
+    }
+  </style>
+</head>
+<body>
+  <h1>Импорт облака точек</h1>
+  <div class="message" id="pci-message">Подготовка...</div>
+  <div class="progress-bar"><span id="pci-progress"></span></div>
+  <button id="pci-cancel">Отмена</button>
+
+  <script>
+    const messageEl = document.getElementById('pci-message');
+    const progressEl = document.getElementById('pci-progress');
+    const cancelButton = document.getElementById('pci-cancel');
+
+    window.pciImport = {
+      update(payload) {
+        if (typeof payload !== 'object' || !payload) return;
+
+        const { message, progress, cancellable } = payload;
+        if (typeof message === 'string') {
+          messageEl.textContent = message;
+        }
+
+        if (typeof progress === 'number' && Number.isFinite(progress)) {
+          const percent = Math.max(0, Math.min(1, progress)) * 100;
+          progressEl.style.width = `${percent}%`;
+        }
+
+        if (typeof cancellable === 'boolean') {
+          cancelButton.disabled = !cancellable;
+        }
+      }
+    };
+
+    cancelButton.addEventListener('click', () => {
+      if (window.sketchup && window.sketchup.pci_cancel_import) {
+        window.sketchup.pci_cancel_import();
+      }
+    });
+
+    document.addEventListener('DOMContentLoaded', () => {
+      if (window.sketchup && window.sketchup.pci_ready) {
+        window.sketchup.pci_ready();
+      }
+    });
+  </script>
+</body>
+</html>
