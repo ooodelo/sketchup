@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'settings'
+require_relative 'settings_buffer'
 require_relative 'spatial_index'
 
 module PointCloudImporter
@@ -51,7 +52,7 @@ module PointCloudImporter
       @point_size = size.to_i.clamp(1, 10)
       settings = Settings.instance
       settings[:point_size] = @point_size
-      settings.save!
+      SettingsBuffer.instance.write_setting(:point_size, @point_size)
       invalidate_display_cache!
     end
 
@@ -70,7 +71,7 @@ module PointCloudImporter
       @display_density = value
       settings = Settings.instance
       settings[:density] = @display_density
-      settings.save!
+      SettingsBuffer.instance.write_setting(:density, @display_density)
       build_display_cache!
       refresh_inference_guides!
     end
@@ -89,7 +90,7 @@ module PointCloudImporter
       @max_display_points = candidate
       settings = Settings.instance
       settings[:max_display_points] = @max_display_points
-      settings.save!
+      SettingsBuffer.instance.write_setting(:max_display_points, @max_display_points)
       build_display_cache!
       refresh_inference_guides!
     end
@@ -307,7 +308,7 @@ module PointCloudImporter
       return if settings[:point_style] == style
 
       settings[:point_style] = style
-      settings.save!
+      settings.save!(:point_style)
     end
 
     class << self

@@ -7,6 +7,8 @@ module PointCloudImporter
   class Settings
     include Singleton
 
+    PREFERENCES_NAMESPACE = 'PointCloudImporter::Preferences'
+
     DEFAULTS = {
       point_size: 3,
       point_style: :square,
@@ -33,24 +35,35 @@ module PointCloudImporter
 
     def load!
       stored = Sketchup.read_default(preferences_namespace, 'values')
-      return unless stored.is_a?(Hash)
+      if stored.is_a?(Hash)
+        stored.each do |key, value|
+          key = key.to_sym
+          next unless DEFAULTS.key?(key)
 
-      stored.each do |key, value|
-        key = key.to_sym
-        next unless DEFAULTS.key?(key)
+          @values[key] = value
+        end
+      end
+
+      DEFAULTS.each_key do |key|
+        next unless (value = Sketchup.read_default(preferences_namespace, key.to_s))
 
         @values[key] = value
       end
     end
 
-    def save!
-      Sketchup.write_default(preferences_namespace, 'values', @values)
+    def save!(keys = nil)
+      keys = Array(keys || @values.keys)
+      keys.each do |key|
+        next unless @values.key?(key)
+
+        Sketchup.write_default(preferences_namespace, key.to_s, @values[key])
+      end
     end
 
     private
 
     def preferences_namespace
-      'PointCloudImporter::Preferences'
+      PREFERENCES_NAMESPACE
     end
   end
 end
