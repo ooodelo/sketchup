@@ -37,7 +37,7 @@ module PointCloudImporter
       def register_callbacks
         @dialog.add_action_callback('pci_ready') { refresh }
         @dialog.add_action_callback('pci_toggle_visibility') do |_, cloud_index|
-          cloud = @manager.clouds[cloud_index.to_i]
+          cloud = validate_cloud_index(cloud_index)
           next unless cloud
 
           cloud.visible = !cloud.visible?
@@ -46,7 +46,7 @@ module PointCloudImporter
           refresh
         end
         @dialog.add_action_callback('pci_activate') do |_, cloud_index|
-          cloud = @manager.clouds[cloud_index.to_i]
+          cloud = validate_cloud_index(cloud_index)
           next unless cloud
 
           @manager.active_cloud = cloud
@@ -54,7 +54,7 @@ module PointCloudImporter
           refresh
         end
         @dialog.add_action_callback('pci_density') do |_, cloud_index, value|
-          cloud = @manager.clouds[cloud_index.to_i]
+          cloud = validate_cloud_index(cloud_index)
           next unless cloud
 
           cloud.density = value.to_f
@@ -62,7 +62,7 @@ module PointCloudImporter
           refresh
         end
         @dialog.add_action_callback('pci_point_size') do |_, cloud_index, value|
-          cloud = @manager.clouds[cloud_index.to_i]
+          cloud = validate_cloud_index(cloud_index)
           next unless cloud
 
           cloud.point_size = value.to_i
@@ -70,7 +70,7 @@ module PointCloudImporter
           refresh
         end
         @dialog.add_action_callback('pci_toggle_inference') do |_, cloud_index|
-          cloud = @manager.clouds[cloud_index.to_i]
+          cloud = validate_cloud_index(cloud_index)
           next unless cloud
 
           model = Sketchup.active_model
@@ -79,7 +79,7 @@ module PointCloudImporter
           refresh
         end
         @dialog.add_action_callback('pci_remove') do |_, cloud_index|
-          cloud = @manager.clouds[cloud_index.to_i]
+          cloud = validate_cloud_index(cloud_index)
           next unless cloud
 
           @manager.remove_cloud(cloud)
@@ -106,6 +106,16 @@ module PointCloudImporter
           end
         }
         @dialog.execute_script("window.pci && window.pci.update(#{JSON.generate(payload)});")
+      end
+
+      def validate_cloud_index(index)
+        cloud_index = index.to_i
+        unless cloud_index.between?(0, @manager.clouds.length - 1)
+          warn("[PointCloudImporter] Invalid cloud index: #{index.inspect} (converted to #{cloud_index})")
+          return nil
+        end
+
+        @manager.clouds[cloud_index]
       end
     end
   end
