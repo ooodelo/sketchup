@@ -31,7 +31,7 @@ module PointCloudImporter
     end
 
     def import(path, options = {})
-      options = { import_step: 1 }.merge(options || {})
+      options = (options || {})
       job = ImportJob.new(path, options)
       run_job(job)
       job
@@ -58,7 +58,6 @@ module PointCloudImporter
           start_time = Time.now
           parser = PlyParser.new(
             job.path,
-            import_step: job.options[:import_step],
             progress_callback: job.progress_callback,
             cancelled_callback: -> { job.cancel_requested? }
           )
@@ -73,8 +72,7 @@ module PointCloudImporter
               colors: colors,
               metadata: metadata,
               duration: Time.now - start_time,
-              total_vertices: total_vertices,
-              import_step: parser.import_step
+              total_vertices: total_vertices
             )
           end
         rescue PlyParser::Cancelled
@@ -122,7 +120,6 @@ module PointCloudImporter
       metadata = data[:metadata]
       duration = data[:duration]
       total_vertices = data[:total_vertices]
-      import_step = data[:import_step]
 
       raise ArgumentError, 'PLY файл не содержит точек' if points.nil? || points.empty?
 
@@ -133,7 +130,7 @@ module PointCloudImporter
       @manager.add_cloud(cloud)
       UI.messagebox(
         "Импорт завершен за #{format('%.2f', duration)} сек. " \
-        "Импортировано #{points.length} из #{total_vertices} точек (каждая #{import_step}-я)"
+        "Импортировано #{points.length} из #{total_vertices} точек"
       )
       result = Result.new(cloud, duration)
       @last_result = result
@@ -157,30 +154,25 @@ module PointCloudImporter
         'Размер точки (1-10)',
         'Стиль точки',
         'Доля отображаемых точек (0.01-1.0)',
-        'Максимум точек в кадре (10000-8000000)',
-        'Импортировать каждую N-ю точку (1 = все точки)'
+        'Максимум точек в кадре (10000-8000000)'
       ]
       defaults = [
         settings[:point_size],
         display_name(settings[:point_style]),
         settings[:density],
-        settings[:max_display_points],
-        1
+        settings[:max_display_points]
       ]
       style_list = available_style_labels.join('|')
-      lists = ['', style_list, '', '', '']
+      lists = ['', style_list, '', '']
       input = UI.inputbox(prompts, defaults, lists, 'Настройки визуализации')
       return unless input
 
-      point_size, style_label, density, max_points, import_step_input = input
-      import_step = validate_import_step(import_step_input)
-      return unless import_step
+      point_size, style_label, density, max_points = input
       {
         point_size: point_size.to_i,
         point_style: resolve_style(style_label),
         display_density: density.to_f,
-        max_display_points: max_points.to_i,
-        import_step: import_step
+        max_display_points: max_points.to_i
       }
     end
 
@@ -222,16 +214,5 @@ module PointCloudImporter
       [STYLE_LABELS.fetch(PointCloud.default_point_style, 'квадрат')]
     end
 
-    def validate_import_step(value)
-      step = Integer(value)
-      if step < 1
-        UI.messagebox('Шаг импорта должен быть целым числом 1 или больше.')
-        return nil
-      end
-      step
-    rescue ArgumentError, TypeError
-      UI.messagebox('Шаг импорта должен быть целым числом 1 или больше.')
-      nil
-    end
   end
 end
