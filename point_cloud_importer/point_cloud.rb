@@ -20,6 +20,18 @@ module PointCloudImporter
       plus: %i[DRAW_POINTS_PLUS DRAW_POINTS_CROSS]
     }.freeze
 
+    LOD_LEVELS = [1.0, 0.5, 0.25, 0.1, 0.05].freeze
+
+    LOD_RULES = [
+      { level: 1.0, enter_ratio: 0.0, exit_ratio: 1.5 },
+      { level: 0.5, enter_ratio: 1.2, exit_ratio: 2.5 },
+      { level: 0.25, enter_ratio: 2.0, exit_ratio: 3.5 },
+      { level: 0.1, enter_ratio: 3.0, exit_ratio: 5.0 },
+      { level: 0.05, enter_ratio: 4.5, exit_ratio: Float::INFINITY }
+    ].freeze
+
+    LOD_FADE_DURATION = 0.35
+
     def initialize(name:, points: nil, colors: nil, metadata: {}, chunk_capacity: ChunkedArray::DEFAULT_CHUNK_CAPACITY)
       @name = name
       @points = ChunkedArray.new(chunk_capacity)
@@ -39,6 +51,10 @@ module PointCloudImporter
       @spatial_index = nil
       @inference_group = nil
       @octree = nil
+      @lod_caches = nil
+      @lod_current_level = nil
+      @lod_previous_level = nil
+      @lod_transition_start = nil
       @bounding_box = Geom::BoundingBox.new
       append_points!(points, colors) if points && !points.empty?
       build_display_cache! if points && !points.empty?
@@ -65,6 +81,10 @@ module PointCloudImporter
       @display_point_indices = nil
       @spatial_index = nil
       @octree = nil
+      @lod_caches = nil
+      @lod_current_level = nil
+      @lod_previous_level = nil
+      @lod_transition_start = nil
     end
 
     def visible?
@@ -116,26 +136,29 @@ module PointCloudImporter
     end
 
     def draw(view)
-      build_display_cache! unless @display_points
-      return if @display_points.nil? || @display_points.empty?
+      ensure_display_caches!
+      caches = @lod_caches
+      return unless caches && !caches.empty?
+
+      update_active_lod_level(view)
+      current_cache = caches[@lod_current_level] || caches[LOD_LEVELS.first]
+      return unless current_cache
+      return if current_cache[:points].nil? || current_cache[:points].empty?
 
       view.drawing_color = nil
       view.line_width = 0
       style = self.class.style_constant(@point_style)
-      visible_batches(view) do |start_index, end_index|
-        points_slice = @display_points.slice(start_index..end_index)
-        if @display_colors
-          colors_slice = @display_colors.slice(start_index..end_index)
-          draw_options = { size: @point_size }
-          draw_options[:style] = style if style
-          draw_options[:colors] = colors_slice
-          view.draw_points(points_slice, **draw_options)
-        else
-          draw_options = { size: @point_size }
-          draw_options[:style] = style if style
-          view.draw_points(points_slice, **draw_options)
-        end
+
+      progress = lod_transition_progress
+      if @lod_previous_level && @lod_previous_level != @lod_current_level && progress < 1.0
+        previous_cache = caches[@lod_previous_level]
+        draw_cache(view, previous_cache, 1.0 - progress, style) if previous_cache
+        draw_cache(view, current_cache, progress, style)
+      else
+        draw_cache(view, current_cache, 1.0, style)
       end
+
+      finalize_lod_transition! if progress >= 1.0
     end
 
     def nearest_point(target)
@@ -285,8 +308,6 @@ module PointCloudImporter
     def apply_point_updates!(changes)
       return unless changes && !changes.empty?
 
-      updates = []
-
       changes.each do |change|
         index = change[:index]
         next unless index.is_a?(Integer)
@@ -298,25 +319,19 @@ module PointCloudImporter
 
         points[index] = new_point if new_point
         colors[index] = new_color if colors && !new_color.nil?
-
-        next unless @display_index_lookup
-
-        display_index = @display_index_lookup[index]
-        next if display_index.nil?
-
-        updates << { index: display_index, point: new_point, color: new_color }
       end
 
-      update_octree_samples!(updates)
+      invalidate_display_cache!
     end
 
     def caches_cleared?
       @display_points.nil? &&
-        @display_colors.nil? &&
-        @display_index_lookup.nil? &&
-        @display_point_indices.nil? &&
-        @spatial_index.nil? &&
-        @octree.nil?
+      @display_colors.nil? &&
+      @display_index_lookup.nil? &&
+      @display_point_indices.nil? &&
+      @spatial_index.nil? &&
+        @octree.nil? &&
+        (@lod_caches.nil? || @lod_caches.empty?)
     end
 
     def disposed?
@@ -366,22 +381,241 @@ module PointCloudImporter
     end
 
     def build_display_cache!
-      step = compute_step
       @spatial_index = nil
-      @display_points = []
-      @display_colors = colors ? [] : nil
-      @display_index_lookup = {}
-      @display_point_indices = []
+      @lod_caches = {}
+
+      return unless points && !points.empty?
+
+      step = compute_step
+      base_points = []
+      base_colors = colors ? [] : nil
+      base_index_lookup = {}
+      base_point_indices = []
 
       (0...points.length).step(step) do |index|
-        @display_points << points[index]
-        @display_colors << colors[index] if @display_colors
-        @display_index_lookup[index] = @display_points.length - 1
-        @display_point_indices << index
-        break if @display_points.length >= @max_display_points
+        point = points[index]
+        next unless point
+
+        base_points << point
+        base_colors << colors[index] if base_colors
+        base_index_lookup[index] = base_points.length - 1
+        base_point_indices << index
+        break if base_points.length >= @max_display_points
       end
 
-      build_octree_from_display_cache!
+      base_cache = create_cache(LOD_LEVELS.first, base_points, base_colors, base_index_lookup, base_point_indices)
+      @lod_caches[LOD_LEVELS.first] = base_cache
+
+      LOD_LEVELS[1..-1].each do |level|
+        @lod_caches[level] = create_downsampled_cache(base_cache, level)
+      end
+
+      assign_primary_cache(base_cache)
+      @lod_current_level ||= LOD_LEVELS.first
+      @lod_previous_level = nil
+      @lod_transition_start = nil
+    end
+
+    def ensure_display_caches!
+      build_display_cache! unless @lod_caches
+
+      if @display_points.nil?
+        base_cache = @lod_caches&.fetch(LOD_LEVELS.first, nil)
+        assign_primary_cache(base_cache)
+      end
+    end
+
+    def assign_primary_cache(cache)
+      if cache
+        @display_points = cache[:points]
+        @display_colors = cache[:colors]
+        @display_index_lookup = cache[:index_lookup]
+        @display_point_indices = cache[:point_indices]
+        @octree = cache[:octree]
+      else
+        @display_points = nil
+        @display_colors = nil
+        @display_index_lookup = nil
+        @display_point_indices = nil
+        @octree = nil
+      end
+    end
+
+    def create_cache(level, points, colors, index_lookup, point_indices)
+      cache_points = points ? points : []
+      cache_colors = colors.nil? ? nil : colors
+      cache_index_lookup = index_lookup ? index_lookup : {}
+      cache_point_indices = point_indices ? point_indices : []
+
+      {
+        level: level,
+        points: cache_points,
+        colors: cache_colors,
+        index_lookup: cache_index_lookup,
+        point_indices: cache_point_indices,
+        octree: build_octree_for_points(cache_points)
+      }
+    end
+
+    def create_downsampled_cache(base_cache, level)
+      return base_cache if base_cache.nil? || level >= 0.999
+
+      points = []
+      colors = base_cache[:colors] ? [] : nil
+      index_lookup = {}
+      point_indices = []
+
+      step = (1.0 / level).round
+      step = 1 if step < 1
+
+      base_points = base_cache[:points] || []
+      base_indices = base_cache[:point_indices] || []
+
+      base_indices.each_with_index do |original_index, base_position|
+        next unless (base_position % step).zero?
+
+        points << base_points[base_position]
+        colors << base_cache[:colors][base_position] if colors && base_cache[:colors]
+        index_lookup[original_index] = points.length - 1
+        point_indices << original_index
+      end
+
+      create_cache(level, points, colors, index_lookup, point_indices)
+    end
+
+    def build_octree_for_points(points)
+      return nil unless points && !points.empty?
+
+      Octree.new(points, max_points_per_node: Octree::MAX_POINTS_PER_NODE)
+    end
+
+    def draw_cache(view, cache, weight, style)
+      return unless cache
+
+      points = cache[:points]
+      return unless points && !points.empty?
+
+      alpha_weight = weight.to_f
+      return if alpha_weight <= 0.0
+
+      colors = cache[:colors]
+
+      visible_batches(view, cache) do |start_index, end_index|
+        points_slice = points.slice(start_index..end_index)
+        draw_options = { size: @point_size }
+        draw_options[:style] = style if style
+        if colors
+          colors_slice = colors.slice(start_index..end_index)
+          draw_options[:colors] = if alpha_weight >= 0.999
+                                    colors_slice
+                                  else
+                                    faded_colors(colors_slice, alpha_weight)
+                                  end
+        elsif alpha_weight < 0.999
+          draw_options[:color] = blended_monochrome(alpha_weight)
+        end
+
+        view.draw_points(points_slice, **draw_options)
+      end
+    end
+
+    def faded_colors(colors, weight)
+      return colors if weight >= 0.999
+      return [] unless colors
+
+      colors.map do |color|
+        next unless color
+
+        faded = Sketchup::Color.new(color)
+        faded.alpha = (color.alpha * weight).round.clamp(0, 255)
+        faded
+      end
+    end
+
+    def blended_monochrome(weight)
+      alpha = (255 * weight).round.clamp(0, 255)
+      Sketchup::Color.new(255, 255, 255, alpha)
+    end
+
+    def update_active_lod_level(view)
+      caches = @lod_caches
+      return unless caches && !caches.empty?
+
+      camera = view&.camera
+      return unless camera
+      return unless camera.respond_to?(:eye)
+
+      eye = camera.eye
+      return unless eye
+
+      center = @bounding_box&.center
+      return unless center
+
+      radius = bounding_radius
+      return if radius <= 0.0
+
+      distance = eye.distance(center)
+      ratio = distance / radius
+      ratio = 0.0 unless ratio.finite?
+
+      target_level = determine_lod_level(ratio)
+      return if target_level == @lod_current_level
+      return unless caches[target_level]
+
+      @lod_previous_level = @lod_current_level
+      @lod_current_level = target_level
+      @lod_transition_start = Time.now
+    end
+
+    def determine_lod_level(ratio)
+      return LOD_LEVELS.first unless ratio.is_a?(Numeric) && ratio.finite?
+
+      current_index = if @lod_current_level
+                        LOD_RULES.index { |rule| rule[:level] == @lod_current_level } || 0
+                      else
+                        LOD_RULES.index { |rule| ratio <= rule[:exit_ratio] } || (LOD_RULES.length - 1)
+                      end
+
+      current_rule = LOD_RULES[current_index]
+
+      if ratio > current_rule[:exit_ratio]
+        while current_index < LOD_RULES.length - 1 && ratio > LOD_RULES[current_index][:exit_ratio]
+          current_index += 1
+        end
+      elsif ratio < current_rule[:enter_ratio]
+        while current_index.positive? && ratio < LOD_RULES[current_index][:enter_ratio]
+          current_index -= 1
+        end
+      end
+
+      LOD_RULES[current_index][:level]
+    end
+
+    def lod_transition_progress
+      return 1.0 unless @lod_previous_level && @lod_transition_start
+
+      elapsed = Time.now - @lod_transition_start
+      progress = elapsed / LOD_FADE_DURATION
+      progress = 0.0 if progress.nan? || progress.negative?
+      [progress, 1.0].min
+    rescue StandardError
+      1.0
+    end
+
+    def finalize_lod_transition!
+      @lod_previous_level = nil
+      @lod_transition_start = nil
+    end
+
+    def bounding_radius
+      return 0.0 unless @bounding_box
+
+      diagonal = @bounding_box.diagonal
+      return 0.0 unless diagonal
+
+      diagonal.to_f * 0.5
+    rescue StandardError
+      0.0
     end
 
     def invalidate_display_cache!
@@ -391,6 +625,10 @@ module PointCloudImporter
       @display_point_indices = nil
       @spatial_index = nil
       @octree = nil
+      @lod_caches = nil
+      @lod_current_level = nil
+      @lod_previous_level = nil
+      @lod_transition_start = nil
     end
 
     def compute_step
@@ -405,11 +643,12 @@ module PointCloudImporter
       ((points.length.to_f / @max_display_points).ceil).clamp(1, points.length)
     end
 
-    def batches
-      return enum_for(:batches) unless block_given?
+    def batches(points)
+      return enum_for(:batches, points) unless block_given?
+      return unless points
 
       start_index = 0
-      total_points = @display_points.length
+      total_points = points.length
 
       while start_index < total_points
         end_index = [start_index + DRAW_BATCH_SIZE - 1, total_points - 1].min
@@ -418,11 +657,16 @@ module PointCloudImporter
       end
     end
 
-    def visible_batches(view)
-      return enum_for(:visible_batches, view) unless block_given?
+    def visible_batches(view, cache)
+      return enum_for(:visible_batches, view, cache) unless block_given?
+      return unless cache
 
-      unless @octree
-        batches do |start_index, end_index|
+      points = cache[:points]
+      return unless points
+
+      octree = cache[:octree]
+      unless octree
+        batches(points) do |start_index, end_index|
           yield(start_index, end_index)
         end
         return
@@ -430,14 +674,14 @@ module PointCloudImporter
 
       frustum = ViewingFrustum.from_view(view)
       if frustum.nil?
-        batches do |start_index, end_index|
+        batches(points) do |start_index, end_index|
           yield(start_index, end_index)
         end
         return
       end
 
       index_batch = []
-      @octree.each_leaf_intersecting(frustum) do |node|
+      octree.each_leaf_intersecting(frustum) do |node|
         node.indices.each do |index|
           index_batch << index
           next unless index_batch.length >= DRAW_BATCH_SIZE
@@ -576,14 +820,6 @@ module PointCloudImporter
       settings[:point_style] = style
     end
 
-    def build_octree_from_display_cache!
-      if @display_points && !@display_points.empty?
-        @octree = Octree.new(@display_points, max_points_per_node: Octree::MAX_POINTS_PER_NODE)
-      else
-        @octree = nil
-      end
-    end
-
     def mark_finalizer_disposed!
       return unless @finalizer_info
 
@@ -596,37 +832,6 @@ module PointCloudImporter
       warn("[PointCloudImporter] Группа направляющих для '#{@name}' не была удалена полностью")
     rescue StandardError => e
       warn("[PointCloudImporter] Ошибка при проверке удаления направляющих для '#{@name}': #{e.message}")
-    end
-
-    def update_octree_samples!(changes)
-      return unless changes && !changes.empty?
-      return unless @display_points
-
-      indices = []
-      changes.each do |change|
-        index = change[:index]
-        next unless index
-        next unless index.is_a?(Integer)
-        next if index.negative?
-        next if index >= @display_points.length
-
-        point = change[:point]
-        color = change[:color]
-
-        if point
-          @display_points[index] = point
-        end
-
-        if @display_colors && !color.nil?
-          @display_colors[index] = color
-        end
-
-        indices << index
-      end
-
-      return if indices.empty?
-
-      @octree&.update_indices(indices)
     end
 
     # Viewing frustum constructed from the current SketchUp view.
