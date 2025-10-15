@@ -2,6 +2,7 @@
 
 require_relative 'settings'
 require_relative 'spatial_index'
+require_relative 'octree'
 
 module PointCloudImporter
   # Data structure representing a point cloud and display preferences.
@@ -30,8 +31,10 @@ module PointCloudImporter
       @max_display_points = @settings[:max_display_points]
       @display_points = nil
       @display_colors = nil
+      @display_index_lookup = nil
       @spatial_index = nil
       @inference_group = nil
+      @octree = nil
       compute_bounds!
       build_display_cache!
     end
@@ -39,7 +42,9 @@ module PointCloudImporter
     def dispose!
       @display_points = nil
       @display_colors = nil
+      @display_index_lookup = nil
       @spatial_index = nil
+      @octree = nil
       remove_inference_guides!
     end
 
@@ -101,7 +106,7 @@ module PointCloudImporter
       view.drawing_color = nil
       view.line_width = 0
       style = self.class.style_constant(@point_style)
-      batches do |points_batch, colors_batch|
+      visible_batches(view) do |points_batch, colors_batch|
         if colors_batch
           draw_options = { size: @point_size }
           draw_options[:style] = style if style
@@ -201,6 +206,34 @@ module PointCloudImporter
       group.hidden = !visible? if group&.valid?
     end
 
+    def apply_point_updates!(changes)
+      return unless changes && !changes.empty?
+
+      updates = []
+
+      changes.each do |change|
+        index = change[:index]
+        next unless index.is_a?(Integer)
+        next if index.negative?
+        next if index >= points.length
+
+        new_point = change[:point]
+        new_color = change[:color]
+
+        points[index] = new_point if new_point
+        colors[index] = new_color if colors && !new_color.nil?
+
+        next unless @display_index_lookup
+
+        display_index = @display_index_lookup[index]
+        next if display_index.nil?
+
+        updates << { index: display_index, point: new_point, color: new_color }
+      end
+
+      update_octree_samples!(updates)
+    end
+
     private
 
     DRAW_BATCH_SIZE = 250_000
@@ -225,19 +258,25 @@ module PointCloudImporter
       step = compute_step
       @display_points = []
       @display_colors = colors ? [] : nil
+      @display_index_lookup = {}
 
       points.each_with_index do |point, index|
         next unless (index % step).zero?
 
         @display_points << point
         @display_colors << colors[index] if @display_colors
+        @display_index_lookup[index] = @display_points.length - 1
         break if @display_points.length >= @max_display_points
       end
+
+      build_octree_from_display_cache!
     end
 
     def invalidate_display_cache!
       @display_points = nil
       @display_colors = nil
+      @display_index_lookup = nil
+      @octree = nil
     end
 
     def compute_step
@@ -266,6 +305,44 @@ module PointCloudImporter
         batch_points = []
         batch_colors = [] if batch_colors
       end
+      return if batch_points.empty?
+
+      yield(batch_points, batch_colors)
+    end
+
+    def visible_batches(view)
+      return enum_for(:visible_batches, view) unless block_given?
+
+      unless @octree
+        batches do |points_batch, colors_batch|
+          yield(points_batch, colors_batch)
+        end
+        return
+      end
+
+      frustum = ViewingFrustum.from_view(view)
+      if frustum.nil?
+        batches do |points_batch, colors_batch|
+          yield(points_batch, colors_batch)
+        end
+        return
+      end
+
+      batch_points = []
+      batch_colors = @display_colors ? [] : nil
+
+      @octree.each_leaf_intersecting(frustum) do |node|
+        node.indices.each do |index|
+          batch_points << @display_points[index]
+          batch_colors << @display_colors[index] if batch_colors
+          next unless batch_points.length >= DRAW_BATCH_SIZE
+
+          yield(batch_points, batch_colors)
+          batch_points = []
+          batch_colors = [] if batch_colors
+        end
+      end
+
       return if batch_points.empty?
 
       yield(batch_points, batch_colors)
@@ -308,6 +385,193 @@ module PointCloudImporter
 
       settings[:point_style] = style
       settings.save!
+    end
+
+    def build_octree_from_display_cache!
+      if @display_points && !@display_points.empty?
+        @octree = Octree.new(@display_points, max_points_per_node: Octree::MAX_POINTS_PER_NODE)
+      else
+        @octree = nil
+      end
+    end
+
+    def update_octree_samples!(changes)
+      return unless changes && !changes.empty?
+      return unless @display_points
+
+      indices = []
+      changes.each do |change|
+        index = change[:index]
+        next unless index
+        next unless index.is_a?(Integer)
+        next if index.negative?
+        next if index >= @display_points.length
+
+        point = change[:point]
+        color = change[:color]
+
+        if point
+          @display_points[index] = point
+        end
+
+        if @display_colors && !color.nil?
+          @display_colors[index] = color
+        end
+
+        indices << index
+      end
+
+      return if indices.empty?
+
+      @octree&.update_indices(indices)
+    end
+
+    # Viewing frustum constructed from the current SketchUp view.
+    class ViewingFrustum
+      Plane = Struct.new(:normal, :distance) do
+        def distance_to(point)
+          (normal.x * point.x) + (normal.y * point.y) + (normal.z * point.z) + distance
+        end
+      end
+
+      attr_reader :planes
+
+      def self.from_view(view)
+        return unless view && view.respond_to?(:camera)
+
+        camera = view.camera
+        return unless camera
+        return unless camera.respond_to?(:perspective?)
+        return unless camera.perspective?
+
+        eye = camera.eye
+        direction = camera.direction
+        return if direction.length.zero?
+
+        direction.normalize!
+        up_vector = camera.respond_to?(:yaxis) ? camera.yaxis : camera.up
+        up_vector = Geom::Vector3d.new(0, 0, 1) unless up_vector
+        right_vector = if camera.respond_to?(:xaxis)
+                         camera.xaxis
+                       else
+                         direction.cross(up_vector)
+                       end
+
+        up = up_vector.clone
+        right = right_vector.clone
+        up.normalize!
+        right.normalize!
+
+        if right.length.zero?
+          fallback = Geom::Vector3d.new(1, 0, 0)
+          fallback = Geom::Vector3d.new(0, 1, 0) if direction.cross(fallback).length.zero?
+          generated = direction.cross(fallback)
+          right = generated.length.zero? ? fallback : generated
+          right.normalize!
+        end
+
+        aspect = view.respond_to?(:vpheight) && view.vpheight.to_f.positive? ? (view.vpwidth.to_f / view.vpheight.to_f) : 1.0
+        aspect = 1.0 if aspect.zero? || aspect.nan?
+
+        fov = camera.respond_to?(:fov) ? camera.fov.to_f : 0.0
+        return if fov <= 0.0
+
+        fov_rad = fov * Math::PI / 180.0
+        near = extract_distance(camera, %i[near znear near_clip], default: 1.0)
+        near = 0.1 if near <= 0.0
+        far = extract_distance(camera, %i[far zfar far_clip], default: near + 1_000_000.0)
+        far = near + 1.0 if far <= near
+
+        near_center = eye.offset(direction, near)
+        near_height = Math.tan(fov_rad * 0.5) * near
+        near_width = near_height * aspect
+
+        up_near = up.clone
+        up_near.length = near_height
+        right_near = right.clone
+        right_near.length = near_width
+
+        ntl = near_center.offset(up_near - right_near)
+        ntr = near_center.offset(up_near + right_near)
+        nbl = near_center.offset(-up_near - right_near)
+        nbr = near_center.offset(-up_near + right_near)
+
+        far_center = eye.offset(direction, far)
+
+        near_normal = direction.clone
+        far_normal = direction.clone
+        far_normal.reverse!
+
+        planes = []
+        planes << create_plane_from_point(near_normal, near_center)
+        planes << create_plane_from_point(far_normal, far_center)
+        planes << create_side_plane(nbl, ntl, eye, direction)
+        planes << create_side_plane(ntr, nbr, eye, direction)
+        planes << create_side_plane(ntr, ntl, eye, direction)
+        planes << create_side_plane(nbl, nbr, eye, direction)
+
+        new(planes)
+      end
+
+      def initialize(planes)
+        @planes = planes.compact
+      end
+
+      def intersects_bounds?(bounds)
+        return false if bounds.nil?
+        return false if @planes.empty?
+
+        corners = bounds.corners
+        @planes.each do |plane|
+          next unless plane
+
+          outside = corners.all? { |corner| plane.distance_to(corner) < 0.0 }
+          return false if outside
+        end
+
+        true
+      end
+
+      def self.create_plane_from_point(normal, point)
+        return unless normal
+        return if normal.length.zero?
+
+        normal.normalize!
+        distance = -(normal.x * point.x + normal.y * point.y + normal.z * point.z)
+        Plane.new(normal, distance)
+      end
+
+      def self.create_side_plane(point_a, point_b, eye, forward)
+        vector_a = point_a - eye
+        vector_b = point_b - eye
+        normal = vector_a.cross(vector_b)
+        return if normal.length.zero?
+
+        normal.normalize!
+        normal.reverse! if normal.dot(forward) < 0.0
+        distance = -(normal.x * eye.x + normal.y * eye.y + normal.z * eye.z)
+        Plane.new(normal, distance)
+      end
+
+      private_class_method :create_plane_from_point
+      private_class_method :create_side_plane
+
+      def self.extract_distance(camera, candidates, default: 1.0)
+        candidates.each do |name|
+          next unless camera.respond_to?(name)
+
+          begin
+            value = camera.public_send(name).to_f
+            return value if value.positive?
+          rescue StandardError
+            next
+          end
+        end
+
+        default
+      end
+
+      private_class_method :extract_distance
     end
 
     class << self
