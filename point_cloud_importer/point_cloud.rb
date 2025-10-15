@@ -35,6 +35,7 @@ module PointCloudImporter
       @display_points = nil
       @display_colors = nil
       @display_index_lookup = nil
+      @display_point_indices = nil
       @spatial_index = nil
       @inference_group = nil
       @octree = nil
@@ -60,6 +61,7 @@ module PointCloudImporter
       @display_points = nil
       @display_colors = nil
       @display_index_lookup = nil
+      @display_point_indices = nil
       @spatial_index = nil
       @octree = nil
     end
@@ -311,6 +313,7 @@ module PointCloudImporter
       @display_points.nil? &&
         @display_colors.nil? &&
         @display_index_lookup.nil? &&
+        @display_point_indices.nil? &&
         @spatial_index.nil? &&
         @octree.nil?
     end
@@ -335,10 +338,8 @@ module PointCloudImporter
       limit = [MAX_INFERENCE_GUIDES, @display_points.length].min
       step = [(@display_points.length.to_f / limit).ceil, 1].max
       guides = []
-      @display_points.each_with_index do |point, index|
-        next unless (index % step).zero?
-
-        guides << point
+      (0...@display_points.length).step(step) do |index|
+        guides << @display_points[index]
         break if guides.length >= limit
       end
       guides
@@ -346,16 +347,17 @@ module PointCloudImporter
 
     def build_display_cache!
       step = compute_step
+      @spatial_index = nil
       @display_points = []
       @display_colors = colors ? [] : nil
       @display_index_lookup = {}
+      @display_point_indices = []
 
-      points.each_with_index do |point, index|
-        next unless (index % step).zero?
-
-        @display_points << point
+      (0...points.length).step(step) do |index|
+        @display_points << points[index]
         @display_colors << colors[index] if @display_colors
         @display_index_lookup[index] = @display_points.length - 1
+        @display_point_indices << index
         break if @display_points.length >= @max_display_points
       end
 
@@ -366,6 +368,8 @@ module PointCloudImporter
       @display_points = nil
       @display_colors = nil
       @display_index_lookup = nil
+      @display_point_indices = nil
+      @spatial_index = nil
       @octree = nil
     end
 
@@ -462,8 +466,11 @@ module PointCloudImporter
     def build_spatial_index!
       return if @spatial_index
 
-      indices = (0...points.length).to_a
-      @spatial_index = SpatialIndex.new(points, indices)
+      build_display_cache! unless @display_points
+      return unless @display_points && !@display_points.empty?
+      return unless @display_point_indices && !@display_point_indices.empty?
+
+      @spatial_index = SpatialIndex.new(@display_points, @display_point_indices)
     end
 
     def compute_world_tolerance(view, pixel_tolerance)
