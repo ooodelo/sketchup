@@ -30,6 +30,7 @@ module PointCloudImporter
     def remove_cloud(cloud)
       return unless @clouds.delete(cloud)
 
+      @overlay&.cloud_removed(cloud)
       cloud.dispose!
       @active_cloud = @clouds.last
       view.invalidate if view
@@ -39,6 +40,7 @@ module PointCloudImporter
       @clouds.each(&:dispose!)
       @clouds.clear
       @active_cloud = nil
+      @overlay&.dispose!
       if @overlay && Sketchup.active_model.respond_to?(:model_overlays)
         Sketchup.active_model.model_overlays.remove(@overlay)
         @overlay = nil
@@ -74,11 +76,11 @@ module PointCloudImporter
       Sketchup.active_model&.active_view
     end
 
-    def draw(view)
+    def draw(view, renderer: nil)
       @clouds.each do |cloud|
         next unless cloud.visible?
 
-        cloud.draw(view)
+        cloud.draw(view, renderer: renderer)
       end
     end
 

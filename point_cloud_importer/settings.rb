@@ -13,6 +13,7 @@ module PointCloudImporter
       max_display_points: 2_000_000,
       density: 1.0,
       sampling_target: 500_000,
+      prefer_hardware_overlay: true,
       dialog_width: 420,
       dialog_height: 520
     }.freeze

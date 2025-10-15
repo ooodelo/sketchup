@@ -30,6 +30,7 @@ module PointCloudImporter
       @max_display_points = @settings[:max_display_points]
       @display_points = nil
       @display_colors = nil
+      @display_revision = 0
       @spatial_index = nil
       @inference_group = nil
       compute_bounds!
@@ -37,8 +38,7 @@ module PointCloudImporter
     end
 
     def dispose!
-      @display_points = nil
-      @display_colors = nil
+      invalidate_display_cache!
       @spatial_index = nil
       remove_inference_guides!
     end
@@ -94,25 +94,42 @@ module PointCloudImporter
       refresh_inference_guides!
     end
 
-    def draw(view)
+    def display_points
       build_display_cache! unless @display_points
-      return if @display_points.empty?
+      @display_points || []
+    end
 
-      view.drawing_color = nil
-      view.line_width = 0
-      style = self.class.style_constant(@point_style)
-      batches do |points_batch, colors_batch|
-        if colors_batch
-          draw_options = { size: @point_size }
-          draw_options[:style] = style if style
-          draw_options[:colors] = colors_batch
-          view.draw_points(points_batch, **draw_options)
-        else
-          draw_options = { size: @point_size }
-          draw_options[:style] = style if style
-          view.draw_points(points_batch, **draw_options)
-        end
+    def display_colors
+      build_display_cache! unless @display_points
+      @display_colors
+    end
+
+    def display_revision
+      @display_revision
+    end
+
+    def point_style_constant
+      self.class.style_constant(@point_style)
+    end
+
+    def point_style_symbol
+      @point_style
+    end
+
+    def draw(view, renderer: nil, fallback: true)
+      build_display_cache! unless @display_points
+      return false if @display_points.empty?
+
+      if renderer
+        rendered = renderer.draw_cloud(self, view)
+        return true if rendered
+        return false unless fallback
       end
+
+      return false unless fallback
+
+      draw_immediate(view)
+      true
     end
 
     def nearest_point(target)
@@ -203,8 +220,32 @@ module PointCloudImporter
 
     private
 
-    DRAW_BATCH_SIZE = 250_000
+    DRAW_BATCH_SIZE = 1_000_000
     MAX_INFERENCE_GUIDES = 50_000
+
+    def draw_immediate(view)
+      view.drawing_color = nil
+      view.line_width = 0
+      style = point_style_constant
+      base_options = { size: @point_size }
+      base_options[:style] = style if style
+
+      if @display_colors
+        color_options = base_options.dup
+        batches do |points_batch, colors_batch|
+          next if points_batch.empty?
+
+          color_options[:colors] = colors_batch
+          view.draw_points(points_batch, **color_options)
+        end
+      else
+        batches do |points_batch, _|
+          next if points_batch.empty?
+
+          view.draw_points(points_batch, **base_options)
+        end
+      end
+    end
 
     def sampled_guides
       return [] unless @display_points
@@ -223,19 +264,24 @@ module PointCloudImporter
 
     def build_display_cache!
       step = compute_step
-      @display_points = []
-      @display_colors = colors ? [] : nil
+      new_points = []
+      new_colors = colors ? [] : nil
 
       points.each_with_index do |point, index|
         next unless (index % step).zero?
 
-        @display_points << point
-        @display_colors << colors[index] if @display_colors
-        break if @display_points.length >= @max_display_points
+        new_points << point
+        new_colors << colors[index] if new_colors
+        break if new_points.length >= @max_display_points
       end
+
+      @display_points = new_points
+      @display_colors = new_colors
+      @display_revision = (@display_revision || 0) + 1
     end
 
     def invalidate_display_cache!
+      @display_revision = (@display_revision || 0) + 1
       @display_points = nil
       @display_colors = nil
     end
