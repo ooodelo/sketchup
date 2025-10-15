@@ -12,8 +12,6 @@ module PointCloudImporter
   class Manager
     include Singleton
 
-    attr_accessor :active_cloud
-
     def initialize
       @clouds_lock = Mutex.new
       @clouds = []
@@ -22,13 +20,28 @@ module PointCloudImporter
     end
 
     def clouds
-      @clouds_lock.synchronize { @clouds.dup }
+      with_clouds_lock { @clouds.dup }
+    end
+
+    def active_cloud
+      with_clouds_lock { @active_cloud }
+    end
+
+    def active_cloud=(cloud)
+      with_clouds_lock do
+        unless cloud.nil? || @clouds.include?(cloud)
+          warn('[PointCloudImporter] Attempted to activate unmanaged cloud.')
+          return @active_cloud
+        end
+
+        @active_cloud = cloud
+      end
     end
 
     def add_cloud(cloud)
-      @clouds_lock.synchronize do
+      with_clouds_lock do
         @clouds << cloud
-        @active_cloud = cloud
+        self.active_cloud = cloud
         ensure_overlay!
       end
       view.invalidate if view
@@ -36,11 +49,11 @@ module PointCloudImporter
 
     def remove_cloud(cloud)
       removed_cloud = nil
-      @clouds_lock.synchronize do
+      with_clouds_lock do
         removed_cloud = @clouds.delete(cloud)
         return unless removed_cloud
 
-        @active_cloud = @clouds.last
+        self.active_cloud = @clouds.last
       end
 
       removed_cloud.dispose!
@@ -54,10 +67,10 @@ module PointCloudImporter
       model = Sketchup.active_model
       supports_overlays = model.respond_to?(:model_overlays)
 
-      @clouds_lock.synchronize do
+      with_clouds_lock do
         clouds_to_dispose = @clouds.dup
         @clouds.clear
-        @active_cloud = nil
+        self.active_cloud = nil
         if supports_overlays
           overlay_to_remove = @overlay
           @overlay = nil
@@ -83,10 +96,11 @@ module PointCloudImporter
     end
 
     def toggle_active_visibility
-      return unless active_cloud
+      cloud = active_cloud
+      return unless cloud
 
-      active_cloud.visible = !active_cloud.visible?
-      active_cloud.sync_inference_visibility!
+      cloud.visible = !cloud.visible?
+      cloud.sync_inference_visibility!
       view.invalidate if view
     end
 
@@ -104,7 +118,7 @@ module PointCloudImporter
     end
 
     def draw(view)
-      clouds_snapshot = @clouds_lock.synchronize { @clouds.dup }
+      clouds_snapshot = clouds
 
       clouds_snapshot.each do |cloud|
         next unless cloud.visible?
@@ -135,6 +149,14 @@ module PointCloudImporter
       warn("[PointCloudImporter] Облако '#{cloud.name}' не полностью освобождено после dispose!")
     rescue StandardError => e
       warn("[PointCloudImporter] Не удалось проверить состояние облака '#{cloud.name}': #{e.message}")
+    end
+
+    def with_clouds_lock
+      if @clouds_lock.owned?
+        yield
+      else
+        @clouds_lock.synchronize { yield }
+      end
     end
   end
 end
