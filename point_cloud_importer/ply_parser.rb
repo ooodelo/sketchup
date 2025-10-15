@@ -48,11 +48,10 @@ module PointCloudImporter
     GREEN_PROPERTY_NAMES = %w[green diffuse_green g].freeze
     BLUE_PROPERTY_NAMES = %w[blue diffuse_blue b].freeze
 
-    attr_reader :path, :total_vertex_count, :import_step
+    attr_reader :path, :total_vertex_count
 
-    def initialize(path, import_step: 1, progress_callback: nil, cancelled_callback: nil)
+    def initialize(path, progress_callback: nil, cancelled_callback: nil)
       @path = path
-      @import_step = normalize_import_step(import_step)
       @progress_callback = progress_callback
       @cancelled_callback = cancelled_callback
       @total_vertex_count = 0
@@ -126,7 +125,6 @@ module PointCloudImporter
       colors = []
       vertex_count = header[:vertex_count] ? header[:vertex_count].to_i : 0
       property_index_by_name = header[:property_index_by_name]
-      import_step = @import_step
       color_indices = color_property_indices(property_index_by_name)
 
       vertex_count.times do |index|
@@ -134,8 +132,6 @@ module PointCloudImporter
         report(index, vertex_count)
         line = io.gets
         break unless line
-
-        next unless (index % import_step).zero?
 
         values = line.split
         point, color = interpret_vertex(values, property_index_by_name, color_indices)
@@ -153,7 +149,6 @@ module PointCloudImporter
       vertex_count = header[:vertex_count] ? header[:vertex_count].to_i : 0
       properties = header[:properties]
       property_index_by_name = header[:property_index_by_name]
-      import_step = @import_step
       color_indices = color_property_indices(property_index_by_name)
 
       stride = properties.sum { |property| bytesize(property[:type]) }
@@ -164,8 +159,6 @@ module PointCloudImporter
         report(index, vertex_count)
         data = io.read(stride)
         break unless data && data.length == stride
-
-        next unless (index % import_step).zero?
 
         vertex_buffer.replace(data)
         values = unpack_binary(vertex_buffer, properties, endian: :little)
@@ -184,7 +177,6 @@ module PointCloudImporter
       vertex_count = header[:vertex_count] ? header[:vertex_count].to_i : 0
       properties = header[:properties]
       property_index_by_name = header[:property_index_by_name]
-      import_step = @import_step
       color_indices = color_property_indices(property_index_by_name)
 
       stride = properties.sum { |property| bytesize(property[:type]) }
@@ -196,8 +188,6 @@ module PointCloudImporter
         data = io.read(stride)
         break unless data && data.length == stride
 
-        next unless (index % import_step).zero?
-
         vertex_buffer.replace(data)
         values = unpack_binary(vertex_buffer, properties, endian: :big)
         point, color = interpret_vertex(values, property_index_by_name, color_indices)
@@ -207,14 +197,6 @@ module PointCloudImporter
 
       colors = nil if colors.empty?
       [points, colors, header[:metadata]]
-    end
-
-    def normalize_import_step(value)
-      step = value.to_i
-      step = 1 if step < 1
-      step
-    rescue StandardError
-      1
     end
 
     def interpret_vertex(values, property_index_by_name, color_indices)
