@@ -89,13 +89,7 @@ module PointCloudImporter
       ray = view.pickray(x, y)
       return unless ray
 
-      plane_normal = view.camera.direction
-      plane_point = cloud.bounding_box.center
-      plane = [plane_point, plane_normal]
-      projection = Geom.intersect_line_plane(ray, plane)
-      return unless projection
-
-      cloud.nearest_point(projection)
+      cloud.closest_point_to_ray(ray, view: view, pixel_tolerance: 10)
     end
 
     def measurement_tool

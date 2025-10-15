@@ -9,11 +9,12 @@ module PointCloudImporter
       @root = build(points.each_with_index.map { |point, local_index| [point, indices[local_index]] })
     end
 
-    def nearest(target)
+    def nearest(target, max_distance: nil)
       return unless @root
 
       best = nil
-      search(@root, target, best)
+      max_distance_sq = max_distance ? max_distance**2 : nil
+      search(@root, target, best, max_distance_sq)
     end
 
     private
@@ -38,7 +39,7 @@ module PointCloudImporter
       node
     end
 
-    def search(node, target, best)
+    def search(node, target, best, max_distance_sq)
       return best unless node
 
       axis = node.axis
@@ -48,16 +49,24 @@ module PointCloudImporter
       next_branch = value < node_value ? node.left : node.right
       opposite_branch = value < node_value ? node.right : node.left
 
-      best = search(next_branch, target, best)
+      best = search(next_branch, target, best, max_distance_sq)
 
       current_distance = squared_distance(node.point, target)
-      if best.nil? || current_distance < best[:distance]
+      within_limit = max_distance_sq.nil? || current_distance <= max_distance_sq
+      if within_limit && (best.nil? || current_distance < best[:distance])
         best = { point: node.point, index: node.index, distance: current_distance }
       end
 
       axis_distance = (value - node_value)**2
-      if opposite_branch && (best.nil? || axis_distance < best[:distance])
-        best = search(opposite_branch, target, best)
+      threshold = if best
+                    best[:distance]
+                  else
+                    max_distance_sq || Float::INFINITY
+                  end
+      threshold = [threshold, max_distance_sq].compact.min
+
+      if opposite_branch && axis_distance <= threshold
+        best = search(opposite_branch, target, best, max_distance_sq)
       end
 
       best
