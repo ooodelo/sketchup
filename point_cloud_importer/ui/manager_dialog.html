@@ -92,8 +92,19 @@
       };
     }
 
+    let currentPayload = { clouds: [] };
+
+    function isValidIndex(index) {
+      return Number.isInteger(index) && index >= 0 && index < currentPayload.clouds.length;
+    }
+
+    function logInvalidIndex(index, source) {
+      console.warn(`[PointCloudImporter] Ignored ${source} request with invalid index:`, index);
+    }
+
     window.pci = {
       update(payload) {
+        currentPayload = payload;
         const tbody = document.querySelector('#cloud-table tbody');
         tbody.innerHTML = '';
         payload.clouds.forEach((cloud, index) => {
@@ -133,21 +144,33 @@
     function wireEvents() {
       document.querySelectorAll('button.toggle').forEach(button => {
         button.addEventListener('click', () => {
-          const index = button.dataset.index;
+          const index = Number.parseInt(button.dataset.index, 10);
+          if (!isValidIndex(index)) {
+            logInvalidIndex(button.dataset.index, 'visibility toggle');
+            return;
+          }
           window.sketchup && window.sketchup.pci_toggle_visibility(index);
         });
       });
 
       document.querySelectorAll('button.activate').forEach(button => {
         button.addEventListener('click', () => {
-          const index = button.dataset.index;
+          const index = Number.parseInt(button.dataset.index, 10);
+          if (!isValidIndex(index)) {
+            logInvalidIndex(button.dataset.index, 'activate');
+            return;
+          }
           window.sketchup && window.sketchup.pci_activate(index);
         });
       });
 
       document.querySelectorAll('button.remove').forEach(button => {
         button.addEventListener('click', () => {
-          const index = button.dataset.index;
+          const index = Number.parseInt(button.dataset.index, 10);
+          if (!isValidIndex(index)) {
+            logInvalidIndex(button.dataset.index, 'remove');
+            return;
+          }
           if (confirm('Удалить облако?')) {
             window.sketchup && window.sketchup.pci_remove(index);
           }
@@ -156,7 +179,11 @@
 
       document.querySelectorAll('input.density').forEach(input => {
         const emit = debounce(value => {
-          const index = input.dataset.index;
+          const index = Number.parseInt(input.dataset.index, 10);
+          if (!isValidIndex(index)) {
+            logInvalidIndex(input.dataset.index, 'density');
+            return;
+          }
           window.sketchup && window.sketchup.pci_density(index, value);
         }, 500);
 
@@ -174,7 +201,11 @@
 
       document.querySelectorAll('input.point-size').forEach(input => {
         const emit = debounce(value => {
-          const index = input.dataset.index;
+          const index = Number.parseInt(input.dataset.index, 10);
+          if (!isValidIndex(index)) {
+            logInvalidIndex(input.dataset.index, 'point size');
+            return;
+          }
           window.sketchup && window.sketchup.pci_point_size(index, value);
         }, 500);
 
@@ -185,7 +216,11 @@
 
       document.querySelectorAll('button.inference').forEach(button => {
         button.addEventListener('click', () => {
-          const index = button.dataset.index;
+          const index = Number.parseInt(button.dataset.index, 10);
+          if (!isValidIndex(index)) {
+            logInvalidIndex(button.dataset.index, 'inference toggle');
+            return;
+          }
           window.sketchup && window.sketchup.pci_toggle_inference(index);
         });
       });
