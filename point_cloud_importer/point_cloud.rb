@@ -5,6 +5,7 @@ require 'weakref'
 require_relative 'settings'
 require_relative 'spatial_index'
 require_relative 'octree'
+require_relative 'chunked_array'
 
 module PointCloudImporter
   # Data structure representing a point cloud and display preferences.
@@ -19,12 +20,11 @@ module PointCloudImporter
       plus: %i[DRAW_POINTS_PLUS DRAW_POINTS_CROSS]
     }.freeze
 
-    def initialize(name:, points:, colors: nil, metadata: {})
+    def initialize(name:, points: nil, colors: nil, metadata: {}, chunk_capacity: ChunkedArray::DEFAULT_CHUNK_CAPACITY)
       @name = name
-      @points = points
-      raise ArgumentError, 'Points array cannot be empty' if @points.nil? || @points.empty?
-      @colors = colors
-      @metadata = metadata
+      @points = ChunkedArray.new(chunk_capacity)
+      @colors = colors ? ChunkedArray.new(chunk_capacity) : nil
+      @metadata = (metadata || {}).dup
       @visible = true
       @settings = Settings.instance
       @point_size = @settings[:point_size]
@@ -39,8 +39,9 @@ module PointCloudImporter
       @spatial_index = nil
       @inference_group = nil
       @octree = nil
-      compute_bounds!
-      build_display_cache!
+      @bounding_box = Geom::BoundingBox.new
+      append_points!(points, colors) if points && !points.empty?
+      build_display_cache! if points && !points.empty?
 
       @finalizer_info = self.class.register_finalizer(self,
                                                       name: @name,
@@ -325,6 +326,25 @@ module PointCloudImporter
         @bounding_box.nil?
     end
 
+    def append_points!(points_chunk, colors_chunk = nil)
+      return if points_chunk.nil? || points_chunk.empty?
+
+      @points.append_chunk(points_chunk)
+      if colors_chunk && !colors_chunk.empty?
+        @colors ||= ChunkedArray.new(@points.chunk_capacity)
+        @colors.append_chunk(colors_chunk)
+      end
+
+      ensure_bounding_box_initialized!
+      points_chunk.each { |point| @bounding_box.add(point) }
+
+      invalidate_display_cache!
+    end
+
+    def update_metadata!(metadata)
+      @metadata = (metadata || {}).dup
+    end
+
     private
 
     DRAW_BATCH_SIZE = 250_000
@@ -461,6 +481,10 @@ module PointCloudImporter
       bbox = Geom::BoundingBox.new
       points.each { |pt| bbox.add(pt) }
       @bounding_box = bbox
+    end
+
+    def ensure_bounding_box_initialized!
+      @bounding_box ||= Geom::BoundingBox.new
     end
 
     def build_spatial_index!

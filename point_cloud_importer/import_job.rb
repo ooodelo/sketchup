@@ -19,6 +19,8 @@ module PointCloudImporter
       @error = nil
       @result = nil
       @cancel_requested = false
+      @cloud = nil
+      @cloud_added = false
       @mutex = Mutex.new
       @last_progress_time = Process.clock_gettime(:float_second) - MIN_PROGRESS_INTERVAL
     end
@@ -88,6 +90,25 @@ module PointCloudImporter
 
     def result
       @mutex.synchronize { @result }
+    end
+
+    def cloud
+      @mutex.synchronize { @cloud }
+    end
+
+    def cloud=(value)
+      @mutex.synchronize do
+        @cloud = value
+        @cloud_added = false if value.nil?
+      end
+    end
+
+    def cloud_added?
+      @mutex.synchronize { @cloud_added }
+    end
+
+    def mark_cloud_added!
+      @mutex.synchronize { @cloud_added = true }
     end
 
     def finished?
