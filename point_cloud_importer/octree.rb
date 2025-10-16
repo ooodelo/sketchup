@@ -173,30 +173,38 @@ module PointCloudImporter
     end
 
     def subdivide(node)
-      return if node.point_indices.length <= @max_points_per_node
-      return if node.depth >= @max_depth
+      stack = []
+      stack << node if node
 
-      bounds = node.bounding_box
-      center = bounds.center
-      buckets = Array.new(8) { [] }
+      until stack.empty?
+        current = stack.pop
+        next unless current
 
-      node.point_indices.each do |index|
-        point = @points[index]
-        next unless point
+        next if current.point_indices.length <= @max_points_per_node
+        next if current.depth >= @max_depth
 
-        bucket_index = octant_index(point, center)
-        buckets[bucket_index] << index
-      end
+        bounds = current.bounding_box
+        center = bounds.center
+        buckets = Array.new(8) { [] }
 
-      node.point_indices.clear
+        current.point_indices.each do |index|
+          point = @points[index]
+          next unless point
 
-      buckets.each_with_index do |bucket, bucket_index|
-        next if bucket.empty?
+          bucket_index = octant_index(point, center)
+          buckets[bucket_index] << index
+        end
 
-        child_bounds = bounds_for_octant(bounds, center, bucket_index)
-        child = OctreeNode.new(bounding_box: child_bounds, point_indices: bucket, depth: node.depth + 1)
-        node.set_child(bucket_index, child)
-        subdivide(child)
+        current.point_indices.clear
+
+        buckets.each_with_index do |bucket, bucket_index|
+          next if bucket.empty?
+
+          child_bounds = bounds_for_octant(bounds, center, bucket_index)
+          child = OctreeNode.new(bounding_box: child_bounds, point_indices: bucket, depth: current.depth + 1)
+          current.set_child(bucket_index, child)
+          stack << child
+        end
       end
     end
 
@@ -560,11 +568,11 @@ module PointCloudImporter
       max_point = box.max
       [
         Geom::Point3d.new(min_point.x, min_point.y, min_point.z),
-        Geom::Point3d.new(max_point.x, max_point.y, min_point.z),
+        Geom::Point3d.new(max_point.x, min_point.y, min_point.z),
         Geom::Point3d.new(min_point.x, max_point.y, min_point.z),
         Geom::Point3d.new(max_point.x, max_point.y, min_point.z),
         Geom::Point3d.new(min_point.x, min_point.y, max_point.z),
-        Geom::Point3d.new(max_point.x, max_point.y, max_point.z),
+        Geom::Point3d.new(max_point.x, min_point.y, max_point.z),
         Geom::Point3d.new(min_point.x, max_point.y, max_point.z),
         Geom::Point3d.new(max_point.x, max_point.y, max_point.z)
       ]
