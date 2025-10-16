@@ -15,13 +15,25 @@ module PointCloudImporter
       @chunk_capacity = [chunk_capacity.to_i, 1].max
       @chunks = []
       @length = 0
+      @last_len = 0
+      @mutable_last_chunk = false
     end
 
     def each
       return enum_for(:each) unless block_given?
 
-      @chunks.each do |chunk|
-        chunk.each { |element| yield(element) }
+      remaining = @length
+      @chunks.each_with_index do |chunk, index|
+        break if remaining <= 0
+
+        limit = if @mutable_last_chunk && index == @chunks.length - 1
+                  [@last_len, remaining].min
+                else
+                  [chunk.length, remaining].min
+                end
+
+        limit.times { |offset| yield(chunk[offset]) }
+        remaining -= limit
       end
     end
 
@@ -60,6 +72,8 @@ module PointCloudImporter
       if values.length <= @chunk_capacity
         @chunks << values
         @length += values.length
+        @last_len = 0
+        @mutable_last_chunk = false
         return
       end
 
@@ -68,9 +82,49 @@ module PointCloudImporter
       end
     end
 
+    def append_direct!(value)
+      chunk = if @mutable_last_chunk && @last_len < @chunk_capacity && !@chunks.empty?
+                @chunks.last
+              else
+                new_chunk = Array.new(@chunk_capacity)
+                @chunks << new_chunk
+                @last_len = 0
+                @mutable_last_chunk = true
+                new_chunk
+              end
+
+      chunk[@last_len] = value
+      @last_len += 1
+      @length += 1
+
+      value
+    end
+
+    def trim_last_chunk!
+      return if @chunks.empty?
+
+      last_chunk = @chunks.last
+      desired_length = if @mutable_last_chunk
+                         @last_len
+                       else
+                         last_chunk.length
+                       end
+
+      if desired_length.zero?
+        @chunks.pop
+      elsif desired_length < last_chunk.length
+        last_chunk.slice!(desired_length, last_chunk.length - desired_length)
+      end
+
+      @mutable_last_chunk = false
+      @last_len = 0
+    end
+
     def clear
       @chunks.clear
       @length = 0
+      @last_len = 0
+      @mutable_last_chunk = false
     end
 
     def chunks

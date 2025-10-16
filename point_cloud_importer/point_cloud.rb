@@ -231,6 +231,9 @@ module PointCloudImporter
     end
 
     def finalize_bounds!
+      @points.trim_last_chunk!
+      @colors&.trim_last_chunk!
+      @intensities&.trim_last_chunk!
       rebuild_bounding_box_from_bounds_if_needed!
       self
     end
@@ -785,14 +788,14 @@ module PointCloudImporter
     def append_points!(points_chunk, colors_chunk = nil, intensities_chunk = nil)
       return if points_chunk.nil? || points_chunk.empty?
 
-      @points.append_chunk(points_chunk)
+      points_chunk.each { |point| @points.append_direct!(point) }
       if colors_chunk && !colors_chunk.empty?
         @colors ||= ChunkedArray.new(@points.chunk_capacity)
-        @colors.append_chunk(colors_chunk)
+        colors_chunk.each { |color| @colors.append_direct!(color) }
       end
       if intensities_chunk && !intensities_chunk.empty?
         @intensities ||= ChunkedArray.new(@points.chunk_capacity)
-        @intensities.append_chunk(intensities_chunk)
+        intensities_chunk.each { |intensity| @intensities.append_direct!(intensity) }
         update_intensity_range!(intensities_chunk)
       end
 
