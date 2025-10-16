@@ -51,6 +51,11 @@ module PointCloudImporter
       @spatial_index = nil
       @inference_group = nil
       @octree = nil
+      @cached_frustum = nil
+      @cached_camera_hash = nil
+      @last_octree_query_stats = nil
+      @octree_debug_enabled = false
+      @octree_metadata = nil
       @lod_caches = nil
       @lod_current_level = nil
       @lod_previous_level = nil
@@ -80,7 +85,10 @@ module PointCloudImporter
       @display_index_lookup = nil
       @display_point_indices = nil
       @spatial_index = nil
-      @octree = nil
+      clear_octree!
+      reset_frustum_cache!
+      @last_octree_query_stats = nil
+      @octree_metadata = nil
       @lod_caches = nil
       @lod_current_level = nil
       @lod_previous_level = nil
@@ -119,6 +127,18 @@ module PointCloudImporter
 
     def density
       @display_density
+    end
+
+    def octree_debug_enabled?
+      !!@octree_debug_enabled
+    end
+
+    def octree_debug_enabled=(value)
+      @octree_debug_enabled = !!value
+    end
+
+    def last_octree_query_stats
+      @last_octree_query_stats || {}
     end
 
     def max_display_points=(value)
@@ -337,6 +357,10 @@ module PointCloudImporter
       @display_point_indices.nil? &&
       @spatial_index.nil? &&
         @octree.nil? &&
+        @octree_metadata.nil? &&
+        @cached_frustum.nil? &&
+        @cached_camera_hash.nil? &&
+        (@last_octree_query_stats.nil? || @last_octree_query_stats.empty?) &&
         (@lod_caches.nil? || @lod_caches.empty?)
     end
 
@@ -388,6 +412,10 @@ module PointCloudImporter
 
     def build_display_cache!
       @spatial_index = nil
+      clear_octree!
+      reset_frustum_cache!
+      @last_octree_query_stats = nil
+      @octree_metadata = nil
       @lod_caches = {}
 
       return unless points && !points.empty?
@@ -438,12 +466,14 @@ module PointCloudImporter
         @display_index_lookup = cache[:index_lookup]
         @display_point_indices = cache[:point_indices]
         @octree = cache[:octree]
+        @octree_metadata = cache[:octree_metadata]
       else
         @display_points = nil
         @display_colors = nil
         @display_index_lookup = nil
         @display_point_indices = nil
         @octree = nil
+        @octree_metadata = nil
       end
     end
 
@@ -459,7 +489,8 @@ module PointCloudImporter
         colors: cache_colors,
         index_lookup: cache_index_lookup,
         point_indices: cache_point_indices,
-        octree: build_octree_for_points(cache_points)
+        octree: build_octree_for_points(cache_points),
+        octree_metadata: { max_display_points_snapshot: @max_display_points }
       }
     end
 
@@ -492,7 +523,9 @@ module PointCloudImporter
     def build_octree_for_points(points)
       return nil unless points && !points.empty?
 
-      Octree.new(points, max_points_per_node: Octree::MAX_POINTS_PER_NODE)
+      Octree.new(points,
+                 max_points_per_node: Octree::DEFAULT_MAX_POINTS_PER_NODE,
+                 max_depth: Octree::DEFAULT_MAX_DEPTH)
     end
 
     def draw_cache(view, cache, weight, style)
@@ -630,7 +663,10 @@ module PointCloudImporter
       @display_index_lookup = nil
       @display_point_indices = nil
       @spatial_index = nil
-      @octree = nil
+      clear_octree!
+      reset_frustum_cache!
+      @last_octree_query_stats = nil
+      @octree_metadata = nil
       @lod_caches = nil
       @lod_current_level = nil
       @lod_previous_level = nil
@@ -647,6 +683,18 @@ module PointCloudImporter
       return step if estimated <= @max_display_points
 
       ((points.length.to_f / @max_display_points).ceil).clamp(1, points.length)
+    end
+
+    def clear_octree!
+      if @octree
+        @octree.clear if @octree.respond_to?(:clear)
+        @octree = nil
+      end
+    end
+
+    def reset_frustum_cache!
+      @cached_frustum = nil
+      @cached_camera_hash = nil
     end
 
     def batches(points)
@@ -670,37 +718,142 @@ module PointCloudImporter
       points = cache[:points]
       return unless points
 
-      octree = cache[:octree]
-      unless octree
-        batches(points) do |start_index, end_index|
-          yield(start_index, end_index)
-        end
-        return
+      total_points = points.length
+      return if total_points.zero?
+
+      octree = ensure_octree_for_cache(cache)
+      frustum = ensure_frustum(view)
+
+      indices = nil
+      if octree && frustum
+        indices = octree.query_frustum(frustum)
+        @last_octree_query_stats = octree.last_query_stats
+      else
+        indices = (0...total_points).to_a
+        @last_octree_query_stats = nil
       end
 
-      frustum = ViewingFrustum.from_view(view)
-      if frustum.nil?
-        batches(points) do |start_index, end_index|
-          yield(start_index, end_index)
-        end
-        return
-      end
+      indices = indices ? indices.dup : []
+      indices = filter_indices_for_density(indices)
+      indices = enforce_max_display_limit(indices)
 
-      index_batch = []
-      octree.each_leaf_intersecting(frustum) do |node|
-        node.indices.each do |index|
-          index_batch << index
-          next unless index_batch.length >= DRAW_BATCH_SIZE
-
-          flush_index_batch(index_batch) do |start_index, end_index|
-            yield(start_index, end_index)
-          end
-        end
-      end
-
-      flush_index_batch(index_batch) do |start_index, end_index|
+      flush_index_batch(indices) do |start_index, end_index|
         yield(start_index, end_index)
       end
+    end
+
+    def ensure_octree_for_cache(cache)
+      points = cache[:points]
+      return nil unless points && !points.empty?
+
+      metadata = cache[:octree_metadata] ||= {}
+      octree = cache[:octree]
+
+      if octree && should_rebuild_octree?(metadata)
+        octree.clear if octree.respond_to?(:clear)
+        cache[:octree] = nil
+        octree = nil
+      end
+
+      unless octree
+        octree = build_octree_for_points(points)
+        cache[:octree] = octree
+      end
+
+      build_octree_if_needed(octree)
+      metadata[:max_display_points_snapshot] = @max_display_points
+
+      if cache.equal?(current_lod_cache)
+        @octree = octree
+        @octree_metadata = metadata
+      end
+
+      octree
+    end
+
+    def build_octree_if_needed(octree)
+      return unless octree
+
+      octree.build unless octree.built?
+      octree
+    end
+
+    def current_lod_cache
+      return nil unless @lod_caches
+
+      @lod_caches[@lod_current_level]
+    end
+
+    def should_rebuild_octree?(metadata)
+      snapshot = metadata[:max_display_points_snapshot]
+      return false unless snapshot
+
+      snapshot = snapshot.to_f
+      return false unless snapshot.positive?
+
+      delta = (@max_display_points.to_f - snapshot).abs
+      return false if delta.zero?
+
+      (delta / snapshot) > 0.5
+    end
+
+    def ensure_frustum(view)
+      hash = camera_state_hash(view)
+      if @cached_frustum && @cached_camera_hash == hash
+        return @cached_frustum
+      end
+
+      frustum = Frustum.from_view(view)
+      @cached_frustum = frustum
+      @cached_camera_hash = hash
+      frustum
+    end
+
+    def camera_state_hash(view)
+      camera = view&.camera
+      return nil unless camera
+
+      eye = camera.eye
+      target = camera.target
+      fov = camera.respond_to?(:fov) ? camera.fov.to_f : 0.0
+
+      values = [eye.x, eye.y, eye.z, target.x, target.y, target.z, fov]
+      values.map { |value| format('%0.3f', value.to_f) }.join(':')
+    rescue StandardError
+      nil
+    end
+
+    def filter_indices_for_density(indices)
+      return [] if indices.nil?
+      return indices if indices.empty?
+      return indices if @display_density >= 0.999
+
+      step = (1.0 / @display_density).round
+      step = 1 if step < 1
+      subsample_indices(indices, step)
+    end
+
+    def enforce_max_display_limit(indices)
+      return [] if indices.nil?
+
+      limit = @max_display_points.to_i
+      return indices if limit <= 0 || indices.length <= limit
+
+      step = (indices.length.to_f / limit).ceil
+      step = 1 if step < 1
+      subsampled = subsample_indices(indices, step)
+      subsampled[0, limit] || []
+    end
+
+    def subsample_indices(indices, step)
+      return [] if indices.nil?
+      return indices if step <= 1
+
+      result = []
+      indices.each_with_index do |index, position|
+        result << index if (position % step).zero?
+      end
+      result
     end
 
     def flush_index_batch(indices)
@@ -840,154 +993,6 @@ module PointCloudImporter
       warn("[PointCloudImporter] Ошибка при проверке удаления направляющих для '#{@name}': #{e.message}")
     end
 
-    # Viewing frustum constructed from the current SketchUp view.
-    class ViewingFrustum
-      Plane = Struct.new(:normal, :distance) do
-        def distance_to(point)
-          (normal.x * point.x) + (normal.y * point.y) + (normal.z * point.z) + distance
-        end
-      end
-
-      attr_reader :planes
-
-      def self.from_view(view)
-        return unless view && view.respond_to?(:camera)
-
-        camera = view.camera
-        return unless camera
-        return unless camera.respond_to?(:perspective?)
-        return unless camera.perspective?
-
-        eye = camera.eye
-        direction = camera.direction
-        return if direction.length.zero?
-
-        direction.normalize!
-        up_vector = camera.respond_to?(:yaxis) ? camera.yaxis : camera.up
-        up_vector = Geom::Vector3d.new(0, 0, 1) unless up_vector
-        right_vector = if camera.respond_to?(:xaxis)
-                         camera.xaxis
-                       else
-                         direction.cross(up_vector)
-                       end
-
-        up = up_vector.clone
-        right = right_vector.clone
-        up.normalize!
-        right.normalize!
-
-        if right.length.zero?
-          fallback = Geom::Vector3d.new(1, 0, 0)
-          fallback = Geom::Vector3d.new(0, 1, 0) if direction.cross(fallback).length.zero?
-          generated = direction.cross(fallback)
-          right = generated.length.zero? ? fallback : generated
-          right.normalize!
-        end
-
-        aspect = view.respond_to?(:vpheight) && view.vpheight.to_f.positive? ? (view.vpwidth.to_f / view.vpheight.to_f) : 1.0
-        aspect = 1.0 if aspect.zero? || aspect.nan?
-
-        fov = camera.respond_to?(:fov) ? camera.fov.to_f : 0.0
-        return if fov <= 0.0
-
-        fov_rad = fov * Math::PI / 180.0
-        near = extract_distance(camera, %i[near znear near_clip], default: 1.0)
-        near = 0.1 if near <= 0.0
-        far = extract_distance(camera, %i[far zfar far_clip], default: near + 1_000_000.0)
-        far = near + 1.0 if far <= near
-
-        near_center = eye.offset(direction, near)
-        near_height = Math.tan(fov_rad * 0.5) * near
-        near_width = near_height * aspect
-
-        up_near = up.clone
-        up_near.length = near_height
-        right_near = right.clone
-        right_near.length = near_width
-
-        ntl = near_center.offset(up_near - right_near)
-        ntr = near_center.offset(up_near + right_near)
-        nbl = near_center.offset(-up_near - right_near)
-        nbr = near_center.offset(-up_near + right_near)
-
-        far_center = eye.offset(direction, far)
-
-        near_normal = direction.clone
-        far_normal = direction.clone
-        far_normal.reverse!
-
-        planes = []
-        planes << create_plane_from_point(near_normal, near_center)
-        planes << create_plane_from_point(far_normal, far_center)
-        planes << create_side_plane(nbl, ntl, eye, direction)
-        planes << create_side_plane(ntr, nbr, eye, direction)
-        planes << create_side_plane(ntr, ntl, eye, direction)
-        planes << create_side_plane(nbl, nbr, eye, direction)
-
-        new(planes)
-      end
-
-      def initialize(planes)
-        @planes = planes.compact
-      end
-
-      def intersects_bounds?(bounds)
-        return false if bounds.nil?
-        return false if @planes.empty?
-
-        corners = bounds.corners
-        @planes.each do |plane|
-          next unless plane
-
-          outside = corners.all? { |corner| plane.distance_to(corner) < 0.0 }
-          return false if outside
-        end
-
-        true
-      end
-
-      def self.create_plane_from_point(normal, point)
-        return unless normal
-        return if normal.length.zero?
-
-        normal.normalize!
-        distance = -(normal.x * point.x + normal.y * point.y + normal.z * point.z)
-        Plane.new(normal, distance)
-      end
-
-      def self.create_side_plane(point_a, point_b, eye, forward)
-        vector_a = point_a - eye
-        vector_b = point_b - eye
-        normal = vector_a.cross(vector_b)
-        return if normal.length.zero?
-
-        normal.normalize!
-        normal.reverse! if normal.dot(forward) < 0.0
-        distance = -(normal.x * eye.x + normal.y * eye.y + normal.z * eye.z)
-        Plane.new(normal, distance)
-      end
-
-      private_class_method :create_plane_from_point
-      private_class_method :create_side_plane
-
-      def self.extract_distance(camera, candidates, default: 1.0)
-        candidates.each do |name|
-          next unless camera.respond_to?(name)
-
-          begin
-            value = camera.public_send(name).to_f
-            return value if value.positive?
-          rescue StandardError
-            next
-          end
-        end
-
-        default
-      end
-
-      private_class_method :extract_distance
-    end
-
     class << self
       def style_constants
         @style_constants ||= compute_style_constants
@@ -1075,9 +1080,14 @@ module PointCloudImporter
             end
           rescue StandardError => e
             warn("[PointCloudImporter] Ошибка финализатора для облака '#{info[:name]}': #{e.message}")
-          end
         end
       end
+
+      if octree_debug_enabled?
+        octree = ensure_octree_for_cache(cache)
+        octree&.draw_debug(view)
+      end
+    end
 
       def lingering_references(info)
         [].tap do |refs|
