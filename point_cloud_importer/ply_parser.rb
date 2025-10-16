@@ -131,28 +131,45 @@ module PointCloudImporter
       format_line = io.gets&.strip
       raise UnsupportedFormat, 'Не PLY файл' unless format_line == 'ply'
 
+      current_element = nil
+
       until (line = io.gets&.strip).nil?
         case line
-        when /^format\s+ascii/
-          header[:format] = :ascii
-        when /^format\s+binary_little_endian/
-          header[:format] = :binary_little
-        when /^format\s+binary_big_endian/
-          header[:format] = :binary_big
+        when /^format\s+(ascii|binary_little_endian|binary_big_endian)(?:\s+([\d.]+))?/i
+          header[:format] =
+            case Regexp.last_match(1)
+            when /ascii/i then :ascii
+            when /binary_little_endian/i then :binary_little
+            when /binary_big_endian/i then :binary_big
+            end
+          version = Regexp.last_match(2)
+          header[:metadata][:format_version] = version if version
         when /^comment\s+(.*)$/
           (header[:metadata][:comments] ||= []) << Regexp.last_match(1)
-        when /^element\s+vertex\s+(\d+)/
+        when /^obj_info\s+(.*)$/
+          (header[:metadata][:obj_info] ||= []) << Regexp.last_match(1)
+        when /^element\s+vertex\s+(\d+)/i
           header[:vertex_count] = Regexp.last_match(1).to_i
           header[:properties] = []
-        when /^property\s+([\w\d_]+)\s+([\w\d_]+)/
-          property_type = Regexp.last_match(1)
-          property_name = Regexp.last_match(2)
+          current_element = :vertex
+        when /^element\s+([\w\d_]+)\s+\d+/i
+          current_element = Regexp.last_match(1).casecmp('vertex').zero? ? :vertex : :other
+        when /^property\s+list\b/i
+          if current_element == :vertex
+            raise UnsupportedFormat, 'Списковые свойства для вершин не поддерживаются.'
+          end
+        when /^property\s+([\w\d_]+)\s+([\w\d_]+)/i
+          next unless current_element == :vertex
+
+          property_type = Regexp.last_match(1).downcase
+          property_name = Regexp.last_match(2).downcase
           position = header[:properties].length
           header[:properties] << { type: property_type, name: property_name, position: position }
         when 'end_header'
           break
         end
       end
+      raise UnsupportedFormat, 'Неизвестный формат PLY.' unless header[:format]
       header[:property_index_by_name] = build_property_index(header[:properties])
       header
     end
