@@ -34,7 +34,7 @@ module PointCloudImporter
 
     def cancel!
       @mutex.synchronize do
-        return if finished?
+        return if finished_locked?
 
         @cancel_requested = true
         @status = :cancelling if @status == :running
@@ -112,7 +112,7 @@ module PointCloudImporter
     end
 
     def finished?
-      %i[completed failed cancelled].include?(status)
+      @mutex.synchronize { finished_locked? }
     end
 
     def completed?
@@ -132,7 +132,7 @@ module PointCloudImporter
       now = monotonic_time
 
       @mutex.synchronize do
-        return if finished?
+        return if finished_locked?
 
         if clamped_fraction && clamped_fraction < 1.0 && (now - @last_progress_time) < MIN_PROGRESS_INTERVAL
           return if !text || text == @message
@@ -151,6 +151,10 @@ module PointCloudImporter
     end
 
     private
+
+    def finished_locked?
+      %i[completed failed cancelled].include?(@status)
+    end
 
     def clamp_fraction(value)
       return nil if value.nil?
