@@ -560,11 +560,11 @@ module PointCloudImporter
       max_point = box.max
       [
         Geom::Point3d.new(min_point.x, min_point.y, min_point.z),
-        Geom::Point3d.new(max_point.x, min_point.y, min_point.z),
+        Geom::Point3d.new(max_point.x, max_point.y, min_point.z),
         Geom::Point3d.new(min_point.x, max_point.y, min_point.z),
         Geom::Point3d.new(max_point.x, max_point.y, min_point.z),
         Geom::Point3d.new(min_point.x, min_point.y, max_point.z),
-        Geom::Point3d.new(max_point.x, min_point.y, max_point.z),
+        Geom::Point3d.new(max_point.x, max_point.y, max_point.z),
         Geom::Point3d.new(min_point.x, max_point.y, max_point.z),
         Geom::Point3d.new(max_point.x, max_point.y, max_point.z)
       ]
