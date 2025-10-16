@@ -70,35 +70,39 @@ module PointCloudImporter
           )
 
           name = File.basename(job.path, '.*')
-          temp_points = []
-          temp_colors = nil
-          temp_intensities = nil
-          total_vertices = 0
+          settings = Settings.instance
+          chunk_size = job.options[:chunk_size] || settings[:import_chunk_size] || 1_000_000
+          chunk_size = chunk_size.to_i
+          chunk_size = 1 if chunk_size < 1
+          invalidate_every_n_chunks = job.options[:invalidate_every_n_chunks] || settings[:invalidate_every_n_chunks] || 1
+          invalidate_every_n_chunks = invalidate_every_n_chunks.to_i
+          invalidate_every_n_chunks = 1 if invalidate_every_n_chunks < 1
 
-          metadata = parser.parse(chunk_size: 1_000_000) do |points_chunk, colors_chunk, intensities_chunk, processed|
+          cloud = PointCloud.new(name: name, metadata: parser.metadata || {})
+          job.cloud = cloud
+
+          chunks_processed = 0
+          metadata = parser.parse(chunk_size: chunk_size) do |points_chunk, colors_chunk, intensities_chunk, processed|
             next if job.cancel_requested?
+            next unless points_chunk && !points_chunk.empty?
 
-            if points_chunk && !points_chunk.empty?
-              temp_points.concat(points_chunk)
-            end
+            cloud.append_points!(points_chunk, colors_chunk, intensities_chunk)
 
-            if colors_chunk && !colors_chunk.empty?
-              temp_colors ||= []
-              temp_colors.concat(colors_chunk)
-            end
-
-            if intensities_chunk && !intensities_chunk.empty?
-              temp_intensities ||= []
-              temp_intensities.concat(intensities_chunk)
-            end
+            chunks_processed += 1
 
             total_vertices = parser.total_vertex_count.to_i
+            total_vertices = processed if total_vertices.zero? || total_vertices < processed
+            job.update_progress(processed_vertices: processed)
             fraction = if total_vertices.positive?
                          processed.to_f / total_vertices
                        else
                          0.0
                        end
             job.update_progress(fraction, format_progress_message(processed, total_vertices))
+
+            next unless (chunks_processed % invalidate_every_n_chunks).zero?
+
+            @manager.view&.invalidate
           end
 
           if job.cancel_requested?
@@ -106,12 +110,11 @@ module PointCloudImporter
             next
           end
 
-          cloud = PointCloud.new(name: name, metadata: parser.metadata || metadata)
-          cloud.set_points_bulk!(temp_points, temp_colors, temp_intensities)
+          metadata ||= parser.metadata
           cloud.update_metadata!(metadata)
 
           total_vertices = parser.total_vertex_count.to_i
-          total_vertices = temp_points.length if total_vertices.zero?
+          total_vertices = cloud.points.length if total_vertices.zero?
 
           job.complete!(
             cloud: cloud,

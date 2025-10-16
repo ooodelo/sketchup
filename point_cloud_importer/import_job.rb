@@ -25,6 +25,7 @@ module PointCloudImporter
       @cloud_added = false
       @mutex = Mutex.new
       @last_progress_time = monotonic_time - MIN_PROGRESS_INTERVAL
+      @processed_vertices = 0
       Logger.debug { "Создано задание импорта для #{path.inspect}" }
     end
 
@@ -135,19 +136,21 @@ module PointCloudImporter
       status == :cancelled
     end
 
-    def update_progress(fraction, text)
-      clamped_fraction = clamp_fraction(fraction)
+    def update_progress(fraction = nil, text = nil, processed_vertices: nil)
+      clamped_fraction = fraction.nil? ? nil : clamp_fraction(fraction)
+      message = text
       now = monotonic_time
 
       @mutex.synchronize do
         return if finished_locked?
 
         if clamped_fraction && clamped_fraction < 1.0 && (now - @last_progress_time) < MIN_PROGRESS_INTERVAL
-          return if !text || text == @message
+          return if (!message || message == @message) && processed_vertices.nil?
         end
 
+        @processed_vertices = [processed_vertices.to_i, @processed_vertices].max if processed_vertices
         @progress = clamped_fraction unless clamped_fraction.nil?
-        @message = text if text
+        @message = message if message
         @last_progress_time = now
       end
     end

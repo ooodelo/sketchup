@@ -17,6 +17,8 @@ module PointCloudImporter
       max_display_points: 2_000_000,
       density: 1.0,
       sampling_target: 500_000,
+      import_chunk_size: 1_000_000,
+      invalidate_every_n_chunks: 5,
       dialog_width: 420,
       dialog_height: 520,
       panel_width: 340,
