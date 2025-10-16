@@ -383,7 +383,7 @@ module PointCloudImporter
     end
 
     def prepare_render_cache!
-      build_display_cache! if @display_cache_dirty || @lod_caches.nil?
+      ensure_display_caches!
       refresh_inference_guides!
       self
     end
@@ -404,7 +404,6 @@ module PointCloudImporter
     end
 
     def draw(view)
-      build_display_cache! if @display_cache_dirty || @lod_caches.nil?
       ensure_display_caches!
       caches = @lod_caches
       return unless caches && !caches.empty?
@@ -560,8 +559,8 @@ module PointCloudImporter
 
       guides = inference_guides_from_sample
       if guides.empty?
-        build_display_cache! unless @display_points
-        return if @display_points.empty?
+        ensure_display_caches!
+        return if @display_points.nil? || @display_points.empty?
 
         guides = sampled_guides
       end
@@ -1280,14 +1279,15 @@ module PointCloudImporter
     end
 
     def ensure_display_caches!
-      build_display_cache! unless @lod_caches
+      build_display_cache! if @display_cache_dirty || @lod_caches.nil?
 
-      if @display_points.nil?
-        base_cache = @lod_caches&.fetch(LOD_LEVELS.first, nil)
+      base_cache = @lod_caches&.fetch(LOD_LEVELS.first, nil)
+      if @display_points.nil? && base_cache
         assign_primary_cache(base_cache)
-        if base_cache && (!build_octree_async? || base_cache[:octree])
-          ensure_octree_for_cache(base_cache)
-        end
+      end
+
+      if base_cache && (!build_octree_async? || base_cache[:octree])
+        ensure_octree_for_cache(base_cache)
       end
     end
 
@@ -1414,6 +1414,11 @@ module PointCloudImporter
     end
 
     def process_background_build_tick
+      if @display_cache_dirty
+        cancel_background_lod_build!
+        return false
+      end
+
       context = @lod_background_context
       unless context && context[:generation] == @lod_cache_generation
         finalize_background_build(context)
@@ -1824,19 +1829,7 @@ module PointCloudImporter
 
     def invalidate_display_cache!
       @display_cache_dirty = true
-      @display_points = nil
-      @display_colors = nil
-      @display_index_lookup = nil
-      @display_point_indices = nil
-      @spatial_index = nil
-      clear_octree!
-      reset_frustum_cache!
-      @last_octree_query_stats = nil
-      @octree_metadata = nil
-      @lod_caches = nil
-      @lod_current_level = nil
-      @lod_previous_level = nil
-      @lod_transition_start = nil
+      @render_cache_preparation_pending = false if @render_cache_preparation_pending
     end
 
     def compute_step
@@ -2146,9 +2139,8 @@ module PointCloudImporter
     end
 
     def build_spatial_index!
+      ensure_display_caches!
       return if @spatial_index
-
-      build_display_cache! unless @display_points
       return unless @display_points && !@display_points.empty?
       return unless @display_point_indices && !@display_point_indices.empty?
 
