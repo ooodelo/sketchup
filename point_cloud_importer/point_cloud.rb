@@ -1398,7 +1398,11 @@ module PointCloudImporter
     end
 
     def build_octree_async?
-      !!@settings[:build_octree_async]
+      if defined?(PointCloudImporter::Config)
+        PointCloudImporter::Config.build_octree_async?
+      else
+        !!@settings[:build_octree_async]
+      end
     end
 
     def warn_background_build_failure(error)

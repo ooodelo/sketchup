@@ -6,6 +6,8 @@ module PointCloudImporter
     module_function
 
     def debug(message = nil, &block)
+      return unless logging_enabled?
+
       text = if block
                safe_call(block)
              else
@@ -25,5 +27,15 @@ module PointCloudImporter
       "<log failed: #{e.class}: #{e.message}>"
     end
     private_class_method :safe_call
+
+    def logging_enabled?
+      if defined?(PointCloudImporter::Config)
+        PointCloudImporter::Config.logging_enabled?
+      else
+        true
+      end
+    rescue StandardError
+      true
+    end
   end
 end

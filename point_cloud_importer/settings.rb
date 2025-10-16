@@ -19,6 +19,8 @@ module PointCloudImporter
       sampling_target: 500_000,
       import_chunk_size: 1_000_000,
       invalidate_every_n_chunks: 5,
+      yield_interval: 10_000,
+      binary_buffer_size: 1_048_576,
       dialog_width: 420,
       dialog_height: 520,
       panel_width: 340,
@@ -27,7 +29,8 @@ module PointCloudImporter
       color_mode: :original,
       color_gradient: :viridis,
       single_color: '#ffffff',
-      build_octree_async: true
+      build_octree_async: true,
+      logging_enabled: true
     }.freeze
 
     attr_reader :values
@@ -43,6 +46,9 @@ module PointCloudImporter
     def []=(key, value)
       key = key.to_sym
       values[key] = value
+      if defined?(PointCloudImporter::Config)
+        PointCloudImporter::Config.apply_setting(key, values[key])
+      end
       SettingsBuffer.instance.write_setting(key, value)
     end
 
@@ -61,6 +67,10 @@ module PointCloudImporter
         next unless (value = Sketchup.read_default(preferences_namespace, key.to_s))
 
         @values[key] = normalize_value(key, value)
+      end
+
+      if defined?(PointCloudImporter::Config)
+        PointCloudImporter::Config.load_from_settings(self)
       end
     end
 
@@ -91,11 +101,35 @@ module PointCloudImporter
         value.to_sym
       when :single_color
         value.to_s
+      when :import_chunk_size, :invalidate_every_n_chunks, :yield_interval, :binary_buffer_size
+        value.to_i
+      when :dialog_width, :dialog_height, :panel_width, :panel_height, :point_size, :max_display_points
+        value.to_i
+      when :auto_apply_changes, :build_octree_async, :logging_enabled
+        normalize_boolean(value)
       else
         value
       end
     rescue StandardError
       DEFAULTS[key]
+    end
+
+    def normalize_boolean(value)
+      case value
+      when true, false
+        value
+      when Numeric
+        !value.to_i.zero?
+      when String
+        stripped = value.strip.downcase
+        return true if %w[true 1 yes on].include?(stripped)
+        return false if %w[false 0 no off].include?(stripped)
+        !stripped.empty?
+      else
+        !!value
+      end
+    rescue StandardError
+      false
     end
   end
 end
