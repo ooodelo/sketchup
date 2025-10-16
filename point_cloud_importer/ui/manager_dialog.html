@@ -24,6 +24,18 @@
       gap: 8px;
     }
 
+    .toolbar label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: #dddddd;
+    }
+
+    .toolbar input[type="checkbox"] {
+      accent-color: #ff9800;
+    }
+
     table {
       width: 100%;
       border-collapse: collapse;
@@ -49,6 +61,11 @@
       cursor: pointer;
     }
 
+    button:disabled {
+      opacity: 0.4;
+      cursor: default;
+    }
+
     button.secondary {
       background-color: #424242;
       color: #fafafa;
@@ -67,6 +84,10 @@
 <body>
   <h1>Импортированные облака</h1>
   <div class="toolbar">
+    <label>
+      <input type="checkbox" id="auto-apply" checked />
+      Auto-apply changes
+    </label>
     <button id="apply-button">Применить</button>
   </div>
   <table id="cloud-table">
@@ -85,15 +106,49 @@
   </table>
 
   <script>
-    function debounce(fn, delay) {
-      let timer;
+    function throttle(fn, interval) {
+      let lastTime = 0;
+      let timeoutId = null;
+      let pendingArgs = null;
+
       return (...args) => {
-        clearTimeout(timer);
-        timer = setTimeout(() => fn(...args), delay);
+        const now = Date.now();
+        const remaining = interval - (now - lastTime);
+        pendingArgs = args;
+
+        if (remaining <= 0) {
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+            timeoutId = null;
+          }
+          lastTime = now;
+          fn(...pendingArgs);
+          pendingArgs = null;
+        } else if (!timeoutId) {
+          timeoutId = setTimeout(() => {
+            lastTime = Date.now();
+            timeoutId = null;
+            fn(...pendingArgs);
+            pendingArgs = null;
+          }, remaining);
+        }
       };
     }
 
-    let currentPayload = { clouds: [] };
+    let currentPayload = { clouds: [], auto_apply: true };
+    let autoApplyEnabled = true;
+
+    function setAutoApplyEnabled(enabled) {
+      autoApplyEnabled = !!enabled;
+      const checkbox = document.getElementById('auto-apply');
+      if (checkbox) {
+        checkbox.checked = autoApplyEnabled;
+      }
+      const applyButton = document.getElementById('apply-button');
+      if (applyButton) {
+        applyButton.disabled = autoApplyEnabled;
+      }
+    }
 
     function isValidIndex(index) {
       return Number.isInteger(index) && index >= 0 && index < currentPayload.clouds.length;
@@ -122,6 +177,8 @@
     window.pci = {
       update(payload) {
         currentPayload = payload;
+        const shouldAutoApply = payload.auto_apply !== false;
+        setAutoApplyEnabled(shouldAutoApply);
         const tbody = document.querySelector('#cloud-table tbody');
         tbody.innerHTML = '';
         payload.clouds.forEach((cloud, index) => {
@@ -214,15 +271,13 @@
       });
 
       document.querySelectorAll('input.density').forEach(input => {
-        const emit = debounce(value => {
-          const index = Number.parseInt(input.dataset.index, 10);
+        const throttledPreview = throttle((index, value) => {
           if (!isValidIndex(index)) {
-            logInvalidIndex(input.dataset.index, 'density');
+            logInvalidIndex(index, 'density preview');
             return;
           }
-          window.sketchup && window.sketchup.pci_density(index, value);
-        }, 500);
-
+          window.sketchup && window.sketchup.pci_preview_density(index, value);
+        }, 100);
         const meta = input.parentElement.querySelector('.meta');
 
         input.addEventListener('input', () => {
@@ -231,22 +286,48 @@
             const numeric = Number.parseFloat(value);
             meta.textContent = Number.isFinite(numeric) ? `${(numeric * 100).toFixed(0)}%` : meta.textContent;
           }
-          emit(value);
+          const index = Number.parseInt(input.dataset.index, 10);
+          if (!isValidIndex(index)) {
+            logInvalidIndex(input.dataset.index, 'density');
+            return;
+          }
+          throttledPreview(index, value);
+        });
+
+        input.addEventListener('change', () => {
+          const index = Number.parseInt(input.dataset.index, 10);
+          if (!isValidIndex(index)) {
+            logInvalidIndex(input.dataset.index, 'density');
+            return;
+          }
+          window.sketchup && window.sketchup.pci_density(index, input.value);
         });
       });
 
       document.querySelectorAll('input.point-size').forEach(input => {
-        const emit = debounce(value => {
+        const throttledPreview = throttle((index, value) => {
+          if (!isValidIndex(index)) {
+            logInvalidIndex(index, 'point size preview');
+            return;
+          }
+          window.sketchup && window.sketchup.pci_preview_point_size(index, value);
+        }, 100);
+        input.addEventListener('input', () => {
           const index = Number.parseInt(input.dataset.index, 10);
           if (!isValidIndex(index)) {
             logInvalidIndex(input.dataset.index, 'point size');
             return;
           }
-          window.sketchup && window.sketchup.pci_point_size(index, value);
-        }, 500);
+          throttledPreview(index, input.value);
+        });
 
-        input.addEventListener('input', () => {
-          emit(input.value);
+        input.addEventListener('change', () => {
+          const index = Number.parseInt(input.dataset.index, 10);
+          if (!isValidIndex(index)) {
+            logInvalidIndex(input.dataset.index, 'point size');
+            return;
+          }
+          window.sketchup && window.sketchup.pci_point_size(index, input.value);
         });
       });
 
@@ -265,12 +346,26 @@
     document.addEventListener('DOMContentLoaded', () => {
       window.sketchup && window.sketchup.pci_ready();
 
+      const autoApplyToggle = document.getElementById('auto-apply');
+      if (autoApplyToggle) {
+        autoApplyToggle.addEventListener('change', () => {
+          const enabled = autoApplyToggle.checked;
+          setAutoApplyEnabled(enabled);
+          window.sketchup && window.sketchup.pci_set_auto_apply(enabled);
+        });
+      }
+
       const applyButton = document.getElementById('apply-button');
       if (applyButton) {
         applyButton.addEventListener('click', () => {
+          if (applyButton.disabled) {
+            return;
+          }
           window.sketchup && window.sketchup.pci_apply_preferences();
         });
       }
+
+      setAutoApplyEnabled(autoApplyEnabled);
     });
   </script>
 </body>

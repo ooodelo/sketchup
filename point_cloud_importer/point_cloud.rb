@@ -104,10 +104,16 @@ module PointCloudImporter
     end
 
     def point_size=(size)
-      @point_size = size.to_i.clamp(1, 10)
+      normalized = size.to_i.clamp(1, 10)
+      previous = @point_size
+      @point_size = normalized
       settings = Settings.instance
       settings[:point_size] = @point_size
-      invalidate_display_cache!
+      invalidate_display_cache! if previous != @point_size
+    end
+
+    def preview_point_size(size)
+      @point_size = size.to_i.clamp(1, 10)
     end
 
     def point_style=(style)
@@ -119,14 +125,16 @@ module PointCloudImporter
     end
 
     def density=(value)
-      value = value.to_f
-      value = 0.01 if value <= 0.0
-      value = 1.0 if value > 1.0
-      @display_density = value
+      normalized = normalize_density(value)
+      @display_density = normalized
       settings = Settings.instance
       settings[:density] = @display_density
       build_display_cache!
       refresh_inference_guides!
+    end
+
+    def preview_density(value)
+      @display_density = normalize_density(value)
     end
 
     def density
@@ -914,6 +922,13 @@ module PointCloudImporter
       values.map { |value| format('%0.3f', value.to_f) }.join(':')
     rescue StandardError
       nil
+    end
+
+    def normalize_density(value)
+      density = value.to_f
+      density = 0.01 if density <= 0.0
+      density = 1.0 if density > 1.0
+      density
     end
 
     def filter_indices_for_density(indices)

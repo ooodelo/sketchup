@@ -18,7 +18,8 @@ module PointCloudImporter
       density: 1.0,
       sampling_target: 500_000,
       dialog_width: 420,
-      dialog_height: 520
+      dialog_height: 520,
+      auto_apply_changes: true
     }.freeze
 
     attr_reader :values
