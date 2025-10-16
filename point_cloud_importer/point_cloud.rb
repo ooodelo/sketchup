@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'weakref'
+require 'thread'
 
 require_relative 'settings'
 require_relative 'spatial_index'
@@ -110,6 +111,7 @@ module PointCloudImporter
       @spatial_index = nil
       @inference_group = nil
       @octree = nil
+      @octree_mutex = Mutex.new
       @cached_frustum = nil
       @cached_camera_hash = nil
       @last_octree_query_stats = nil
@@ -163,6 +165,7 @@ module PointCloudImporter
       @bounds_max_x = nil
       @bounds_max_y = nil
       @bounds_max_z = nil
+      @octree_mutex = nil
       mark_finalizer_disposed!
     end
 
@@ -1222,8 +1225,7 @@ module PointCloudImporter
                                 base_points,
                                 base_colors,
                                 base_index_lookup,
-                                base_point_indices,
-                                build_octree: !build_octree_async?)
+                                base_point_indices)
       @lod_caches[LOD_LEVELS.first] = base_cache
 
       assign_primary_cache(base_cache)
@@ -1236,9 +1238,10 @@ module PointCloudImporter
         start_background_lod_build(base_cache, current_generation)
       else
         LOD_LEVELS[1..-1].each do |level|
-          @lod_caches[level] = create_downsampled_cache(base_cache, level, build_octree: true)
+          @lod_caches[level] = create_downsampled_cache(base_cache, level)
         end
         @lod_background_build_pending = false
+        ensure_octree_for_cache(base_cache)
       end
     end
 
@@ -1248,33 +1251,41 @@ module PointCloudImporter
       if @display_points.nil?
         base_cache = @lod_caches&.fetch(LOD_LEVELS.first, nil)
         assign_primary_cache(base_cache)
+        if base_cache && (!build_octree_async? || base_cache[:octree])
+          ensure_octree_for_cache(base_cache)
+        end
       end
     end
 
     def assign_primary_cache(cache)
+      mutex = (@octree_mutex ||= Mutex.new)
+
       if cache
         @display_points = cache[:points]
         @display_colors = cache[:colors]
         @display_index_lookup = cache[:index_lookup]
         @display_point_indices = cache[:point_indices]
-        @octree = cache[:octree]
-        @octree_metadata = cache[:octree_metadata]
+        mutex.synchronize do
+          @octree = cache[:octree]
+          @octree_metadata = cache[:octree_metadata]
+        end
       else
         @display_points = nil
         @display_colors = nil
         @display_index_lookup = nil
         @display_point_indices = nil
-        @octree = nil
-        @octree_metadata = nil
+        mutex.synchronize do
+          @octree = nil
+          @octree_metadata = nil
+        end
       end
     end
 
-    def create_cache(level, points, colors, index_lookup, point_indices, build_octree: true)
+    def create_cache(level, points, colors, index_lookup, point_indices)
       cache_points = points ? points : []
       cache_colors = colors.nil? ? nil : colors
       cache_index_lookup = index_lookup ? index_lookup : {}
       cache_point_indices = point_indices ? point_indices : []
-      cache_octree = build_octree ? build_octree_for_points(cache_points) : nil
 
       {
         level: level,
@@ -1282,12 +1293,12 @@ module PointCloudImporter
         colors: cache_colors,
         index_lookup: cache_index_lookup,
         point_indices: cache_point_indices,
-        octree: cache_octree,
-        octree_metadata: { max_display_points_snapshot: @max_display_points }
+        octree: nil,
+        octree_metadata: nil
       }
     end
 
-    def create_downsampled_cache(base_cache, level, build_octree: true)
+    def create_downsampled_cache(base_cache, level)
       return base_cache if base_cache.nil? || level >= 0.999
 
       points = []
@@ -1310,7 +1321,7 @@ module PointCloudImporter
         point_indices << original_index
       end
 
-      create_cache(level, points, colors, index_lookup, point_indices, build_octree: build_octree)
+      create_cache(level, points, colors, index_lookup, point_indices)
     end
 
     def start_background_lod_build(base_cache, generation)
@@ -1327,12 +1338,11 @@ module PointCloudImporter
                                          base_points,
                                          base_colors,
                                          base_index_lookup,
-                                         base_point_indices,
-                                         build_octree: true)
+                                         base_point_indices)
 
           lod_caches = { LOD_LEVELS.first => full_base_cache }
           LOD_LEVELS[1..-1].each do |level|
-            lod_caches[level] = create_downsampled_cache(full_base_cache, level, build_octree: true)
+            lod_caches[level] = create_downsampled_cache(full_base_cache, level)
           end
 
           spatial_index = build_spatial_index_for_cache(full_base_cache)
@@ -1340,6 +1350,7 @@ module PointCloudImporter
           if @lod_cache_generation == generation
             @lod_caches = lod_caches
             assign_primary_cache(full_base_cache)
+            ensure_octree_for_cache(full_base_cache)
             @spatial_index = spatial_index
           end
         rescue StandardError => error
@@ -1572,9 +1583,12 @@ module PointCloudImporter
     end
 
     def clear_octree!
-      if @octree
-        @octree.clear if @octree.respond_to?(:clear)
-        @octree = nil
+      mutex = (@octree_mutex ||= Mutex.new)
+      mutex.synchronize do
+        if @octree
+          @octree.clear if @octree.respond_to?(:clear)
+          @octree = nil
+        end
       end
     end
 
@@ -1629,31 +1643,56 @@ module PointCloudImporter
     end
 
     def ensure_octree_for_cache(cache)
+      return nil unless cache
+
       points = cache[:points]
       return nil unless points && !points.empty?
 
-      metadata = cache[:octree_metadata] ||= {}
-      octree = cache[:octree]
+      mutex = (@octree_mutex ||= Mutex.new)
+      octree = nil
+      needs_build = false
 
-      if octree && should_rebuild_octree?(metadata)
-        octree.clear if octree.respond_to?(:clear)
-        cache[:octree] = nil
-        octree = nil
+      mutex.synchronize do
+        metadata = cache[:octree_metadata] ||= {}
+        octree = cache[:octree]
+
+        if octree && should_rebuild_octree?(metadata)
+          octree.clear if octree.respond_to?(:clear)
+          cache[:octree] = nil
+          octree = nil
+        end
+
+        needs_build = octree.nil?
       end
 
-      unless octree
-        octree = build_octree_for_points(points)
-        cache[:octree] = octree
+      if needs_build
+        built_octree = build_octree_for_points(points)
+
+        mutex.synchronize do
+          cache[:octree] ||= built_octree
+          metadata = cache[:octree_metadata] ||= {}
+          octree = cache[:octree]
+          metadata[:max_display_points_snapshot] = @max_display_points
+
+          if cache.equal?(current_lod_cache)
+            @octree = octree
+            @octree_metadata = metadata
+          end
+        end
+      else
+        mutex.synchronize do
+          metadata = cache[:octree_metadata] ||= {}
+          octree = cache[:octree]
+          metadata[:max_display_points_snapshot] = @max_display_points
+
+          if cache.equal?(current_lod_cache)
+            @octree = octree
+            @octree_metadata = metadata
+          end
+        end
       end
 
       build_octree_if_needed(octree)
-      metadata[:max_display_points_snapshot] = @max_display_points
-
-      if cache.equal?(current_lod_cache)
-        @octree = octree
-        @octree_metadata = metadata
-      end
-
       octree
     end
 
