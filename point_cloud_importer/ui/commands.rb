@@ -48,6 +48,7 @@ module PointCloudImporter
         @panel.refresh!
       end
       alias_method :refresh_panel_if_visible, :refresh_panel
+      public :refresh_panel_if_visible
 
       private
 
