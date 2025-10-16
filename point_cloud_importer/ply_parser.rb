@@ -14,7 +14,9 @@ module PointCloudImporter
     PROGRESS_REPORT_INTERVAL = 0.5
     THREAD_YIELD_INTERVAL = 10_000
     BINARY_READ_BUFFER_SIZE = 1_048_576
-    DEFAULT_BINARY_VERTEX_BATCH_SIZE = 4_096
+    BINARY_VERTEX_BATCH_MIN = 4_096
+    BINARY_VERTEX_BATCH_MAX = 8_192
+    DEFAULT_BINARY_VERTEX_BATCH_SIZE = BINARY_VERTEX_BATCH_MIN
 
 
     TYPE_MAP = {
@@ -266,7 +268,11 @@ module PointCloudImporter
       batch_size_preference = configuration_value(:binary_vertex_batch_size,
                                                   DEFAULT_BINARY_VERTEX_BATCH_SIZE)
       batch_size_preference = batch_size_preference.to_i
-      batch_size_preference = DEFAULT_BINARY_VERTEX_BATCH_SIZE if batch_size_preference < 1
+      if batch_size_preference < BINARY_VERTEX_BATCH_MIN
+        batch_size_preference = BINARY_VERTEX_BATCH_MIN
+      elsif batch_size_preference > BINARY_VERTEX_BATCH_MAX
+        batch_size_preference = BINARY_VERTEX_BATCH_MAX
+      end
 
       yield_interval = configuration_value(:yield_interval, THREAD_YIELD_INTERVAL)
 
@@ -281,7 +287,7 @@ module PointCloudImporter
         check_cancelled!
 
         remaining = vertex_count - processed
-        batch_size = [batch_size_preference, max_vertices_per_buffer, remaining].min
+        batch_size = [batch_size_preference, max_vertices_per_buffer, remaining, BINARY_VERTEX_BATCH_MAX].min
         bytes_to_read = stride * batch_size
         raw_data = io.read(bytes_to_read)
         break unless raw_data && raw_data.bytesize == bytes_to_read
