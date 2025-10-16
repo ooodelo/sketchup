@@ -34,6 +34,9 @@ module PointCloudImporter
 
     LOD_FADE_DURATION = 0.35
 
+    LARGE_POINT_COUNT_THRESHOLD = 3_000_000
+    DEFAULT_DISPLAY_POINT_CAP = 1_200_000
+
     DEFAULT_SINGLE_COLOR_HEX = '#ffffff'
 
     COLOR_MODE_DEFINITIONS = [
@@ -120,6 +123,12 @@ module PointCloudImporter
       @intensity_max = nil
       @random_seed = deterministic_seed_for(name)
       @bounding_box = Geom::BoundingBox.new
+      @bounds_min_x = nil
+      @bounds_min_y = nil
+      @bounds_min_z = nil
+      @bounds_max_x = nil
+      @bounds_max_y = nil
+      @bounds_max_z = nil
       @display_cache_dirty = false
       append_points!(points, colors, intensities) if points && !points.empty?
 
@@ -143,6 +152,12 @@ module PointCloudImporter
       @intensity_min = nil
       @intensity_max = nil
       @bounding_box = nil
+      @bounds_min_x = nil
+      @bounds_min_y = nil
+      @bounds_min_z = nil
+      @bounds_max_x = nil
+      @bounds_max_y = nil
+      @bounds_max_z = nil
       mark_finalizer_disposed!
     end
 
@@ -282,18 +297,18 @@ module PointCloudImporter
         file << "end_header\n"
 
         @points.each_with_index do |point, index|
-          next unless point
+          coords = point_coordinates(point)
+          next unless coords
 
-          components = [format('%.6f', point.x.to_f),
-                        format('%.6f', point.y.to_f),
-                        format('%.6f', point.z.to_f)]
+          x, y, z = coords
+          components = [format('%.6f', x.to_f),
+                        format('%.6f', y.to_f),
+                        format('%.6f', z.to_f)]
 
           if include_colors
-            color = @colors && @colors[index]
-            color = Sketchup::Color.new(255, 255, 255) unless color
-            components << color.red.to_i
-            components << color.green.to_i
-            components << color.blue.to_i
+            color_components = fetch_color_components(@colors && @colors[index])
+            color_components ||= [255, 255, 255]
+            components.concat(color_components.map(&:to_i))
           end
 
           if include_intensity
@@ -379,7 +394,7 @@ module PointCloudImporter
       result = @spatial_index.nearest(target)
       return unless result
 
-      points[result[:index]]
+      result[:point] || point3d_from(points[result[:index]])
     end
 
     def closest_point_to_ray(ray, view:, pixel_tolerance: 10)
@@ -424,7 +439,9 @@ module PointCloudImporter
         candidate = @spatial_index.nearest(sample_point, max_distance: search_radius)
         next unless candidate
 
-        point = points[candidate[:index]]
+        point = candidate[:point] || point3d_from(points[candidate[:index]])
+        next unless point
+
         projection, distance_sq = projection_and_distance_sq(point, origin, direction)
 
         next if projection < (entry - tolerance) || projection > (exit + tolerance)
@@ -564,7 +581,7 @@ module PointCloudImporter
       points_for_guides = indices.each_with_object([]) do |index, collection|
         next unless index.is_a?(Integer) && index >= 0 && index < points.length
 
-        point = points[index]
+        point = point3d_from(points[index])
         collection << point if point
       end
       return if points_for_guides.empty?
@@ -602,7 +619,7 @@ module PointCloudImporter
       @inference_sample_indices.each_with_object([]) do |index, guides|
         next unless index.is_a?(Integer)
 
-        point = points[index]
+        point = point3d_from(points[index])
         guides << point if point
       end
     end
@@ -620,8 +637,16 @@ module PointCloudImporter
         new_color = change[:color]
         new_intensity = change[:intensity]
 
-        points[index] = new_point if new_point
-        colors[index] = new_color if colors && !new_color.nil?
+        if new_point
+          coords = point_coordinates(new_point)
+          stored_point = coords ? [coords[0], coords[1], coords[2]] : new_point
+          points[index] = stored_point
+          update_bounds_with_chunk([stored_point])
+        end
+
+        if colors && !new_color.nil?
+          colors[index] = fetch_color_components(new_color) || new_color
+        end
         if @intensities && !new_intensity.nil?
           @intensities[index] = new_intensity
           update_intensity_range!([new_intensity])
@@ -657,6 +682,7 @@ module PointCloudImporter
       colors_array = nil if colors_array&.empty?
       intensities_array = nil if intensities_array&.empty?
 
+      reset_bounds_state!
       @points.clear
       points_array.each_slice(@points.chunk_capacity) do |slice|
         @points.append_chunk(slice)
@@ -706,8 +732,7 @@ module PointCloudImporter
         update_intensity_range!(intensities_chunk)
       end
 
-      ensure_bounding_box_initialized!
-      points_chunk.each { |point| @bounding_box.add(point) }
+      update_bounds_with_chunk(points_chunk)
 
       mark_display_cache_dirty!
     end
@@ -722,6 +747,149 @@ module PointCloudImporter
       return if @display_cache_dirty
 
       invalidate_display_cache!
+    end
+
+    def reset_bounds_state!
+      @bounds_min_x = nil
+      @bounds_min_y = nil
+      @bounds_min_z = nil
+      @bounds_max_x = nil
+      @bounds_max_y = nil
+      @bounds_max_z = nil
+      @bounding_box = Geom::BoundingBox.new
+    end
+
+    def rebuild_bounding_box_from_bounds!
+      if [@bounds_min_x, @bounds_min_y, @bounds_min_z,
+          @bounds_max_x, @bounds_max_y, @bounds_max_z].any?(&:nil?)
+        @bounding_box = Geom::BoundingBox.new
+        return
+      end
+
+      bbox = Geom::BoundingBox.new
+      bbox.add(Geom::Point3d.new(@bounds_min_x, @bounds_min_y, @bounds_min_z))
+      bbox.add(Geom::Point3d.new(@bounds_max_x, @bounds_max_y, @bounds_max_z))
+      @bounding_box = bbox
+    end
+
+    def update_bounds_with_chunk(points_chunk)
+      return unless points_chunk && !points_chunk.empty?
+
+      chunk_min_x = Float::INFINITY
+      chunk_min_y = Float::INFINITY
+      chunk_min_z = Float::INFINITY
+      chunk_max_x = -Float::INFINITY
+      chunk_max_y = -Float::INFINITY
+      chunk_max_z = -Float::INFINITY
+
+      points_chunk.each do |point|
+        coords = point_coordinates(point)
+        next unless coords
+
+        x, y, z = coords
+        chunk_min_x = x if x < chunk_min_x
+        chunk_max_x = x if x > chunk_max_x
+        chunk_min_y = y if y < chunk_min_y
+        chunk_max_y = y if y > chunk_max_y
+        chunk_min_z = z if z < chunk_min_z
+        chunk_max_z = z if z > chunk_max_z
+      end
+
+      return if chunk_min_x == Float::INFINITY
+
+      if @bounds_min_x.nil?
+        @bounds_min_x = chunk_min_x
+        @bounds_min_y = chunk_min_y
+        @bounds_min_z = chunk_min_z
+        @bounds_max_x = chunk_max_x
+        @bounds_max_y = chunk_max_y
+        @bounds_max_z = chunk_max_z
+      else
+        @bounds_min_x = [@bounds_min_x, chunk_min_x].min
+        @bounds_min_y = [@bounds_min_y, chunk_min_y].min
+        @bounds_min_z = [@bounds_min_z, chunk_min_z].min
+        @bounds_max_x = [@bounds_max_x, chunk_max_x].max
+        @bounds_max_y = [@bounds_max_y, chunk_max_y].max
+        @bounds_max_z = [@bounds_max_z, chunk_max_z].max
+      end
+
+      rebuild_bounding_box_from_bounds!
+    end
+
+    AXIS_INDICES = { x: 0, y: 1, z: 2 }.freeze
+
+    def point_coordinate(point, axis)
+      return nil unless point
+
+      if point.respond_to?(axis)
+        value = point.public_send(axis)
+      elsif point.respond_to?(:[]) && AXIS_INDICES.key?(axis)
+        value = point[AXIS_INDICES[axis]]
+      end
+
+      return nil if value.nil?
+
+      value.to_f
+    rescue StandardError
+      nil
+    end
+
+    def point_coordinates(point)
+      return nil unless point
+
+      if point.respond_to?(:x) && point.respond_to?(:y) && point.respond_to?(:z)
+        [point.x.to_f, point.y.to_f, point.z.to_f]
+      elsif point.respond_to?(:[])
+        x = point[0]
+        y = point[1]
+        z = point[2]
+        return nil if x.nil? || y.nil? || z.nil?
+
+        [x.to_f, y.to_f, z.to_f]
+      else
+        nil
+      end
+    rescue StandardError
+      nil
+    end
+
+    def point3d_from(point)
+      return point if point.is_a?(Geom::Point3d)
+
+      coords = point_coordinates(point)
+      return nil unless coords
+
+      Geom::Point3d.new(coords[0], coords[1], coords[2])
+    rescue StandardError
+      nil
+    end
+
+    def fetch_color_components(stored)
+      return nil unless stored
+
+      if stored.respond_to?(:red) && stored.respond_to?(:green) && stored.respond_to?(:blue)
+        [stored.red.to_i, stored.green.to_i, stored.blue.to_i]
+      elsif stored.is_a?(Array)
+        r = stored[0]
+        g = stored[1]
+        b = stored[2]
+        return nil if r.nil? || g.nil? || b.nil?
+
+        [r.to_i, g.to_i, b.to_i]
+      else
+        nil
+      end
+    rescue StandardError
+      nil
+    end
+
+    def color_from_storage(stored)
+      components = fetch_color_components(stored)
+      return nil unless components
+
+      Sketchup::Color.new(components[0], components[1], components[2])
+    rescue StandardError
+      nil
     end
 
     DRAW_BATCH_SIZE = 250_000
@@ -778,8 +946,8 @@ module PointCloudImporter
     def original_color_at(index)
       return nil unless @colors && index
 
-      color = @colors[index]
-      color ? Sketchup::Color.new(color) : Sketchup::Color.new(255, 255, 255)
+      color = color_from_storage(@colors[index])
+      color || Sketchup::Color.new(255, 255, 255)
     rescue StandardError
       Sketchup::Color.new(255, 255, 255)
     end
@@ -932,27 +1100,33 @@ module PointCloudImporter
     end
 
     def normalize_height(point)
-      return 0.5 unless point && @bounding_box
+      return 0.5 unless @bounding_box
+
+      z = point_coordinate(point, :z)
+      return 0.5 if z.nil?
 
       min_z = @bounding_box.min.z
       max_z = @bounding_box.max.z
       range = max_z - min_z
       return 0.5 if range.abs < Float::EPSILON
 
-      clamp01((point.z.to_f - min_z) / range)
+      clamp01((z.to_f - min_z) / range)
     rescue StandardError
       0.5
     end
 
     def rgb_from_xyz(point)
-      return Sketchup::Color.new(255, 255, 255) unless point && @bounding_box
+      return Sketchup::Color.new(255, 255, 255) unless @bounding_box
+
+      coords = point_coordinates(point)
+      return Sketchup::Color.new(255, 255, 255) unless coords
 
       min = @bounding_box.min
       max = @bounding_box.max
 
-      x = normalize_component(point.x, min.x, max.x)
-      y = normalize_component(point.y, min.y, max.y)
-      z = normalize_component(point.z, min.z, max.z)
+      x = normalize_component(coords[0], min.x, max.x)
+      y = normalize_component(coords[1], min.y, max.y)
+      z = normalize_component(coords[2], min.z, max.z)
 
       Sketchup::Color.new((x * 255).round.clamp(0, 255),
                           (y * 255).round.clamp(0, 255),
@@ -1002,7 +1176,7 @@ module PointCloudImporter
       base_point_indices = []
 
       (0...points.length).step(step) do |index|
-        point = points[index]
+        point = point3d_from(points[index])
         next unless point
 
         base_points << point
@@ -1250,15 +1424,29 @@ module PointCloudImporter
     end
 
     def compute_step
+      total_points = points.length
+      return 1 if total_points <= 0
       return 1 if @display_density >= 0.999
 
       step = (1.0 / @display_density).round
       step = 1 if step < 1
 
-      estimated = (points.length / step)
-      return step if estimated <= @max_display_points
+      configured_limit = @max_display_points.to_i
+      configured_limit = 0 if configured_limit.negative?
+      limit = configured_limit.positive? ? configured_limit : DEFAULT_DISPLAY_POINT_CAP
 
-      ((points.length.to_f / @max_display_points).ceil).clamp(1, points.length)
+      if total_points > LARGE_POINT_COUNT_THRESHOLD
+        limit = [limit, DEFAULT_DISPLAY_POINT_CAP].min
+      end
+
+      estimated = (total_points / step)
+      if estimated > limit && limit.positive?
+        step = (total_points.to_f / limit).ceil
+      elsif limit <= 0
+        step = (total_points.to_f / DEFAULT_DISPLAY_POINT_CAP).ceil
+      end
+
+      step.clamp(1, total_points)
     end
 
     def clear_octree!
@@ -1463,7 +1651,7 @@ module PointCloudImporter
 
     def compute_bounds_efficient!(points)
       if points.nil? || points.empty?
-        @bounding_box = Geom::BoundingBox.new
+        reset_bounds_state!
         return
       end
 
@@ -1475,11 +1663,10 @@ module PointCloudImporter
       max_z = -Float::INFINITY
 
       points.each do |point|
-        next unless point
+        coords = point_coordinates(point)
+        next unless coords
 
-        x = point.x
-        y = point.y
-        z = point.z
+        x, y, z = coords
 
         min_x = x if x < min_x
         max_x = x if x > max_x
@@ -1490,25 +1677,28 @@ module PointCloudImporter
       end
 
       if min_x == Float::INFINITY
-        @bounding_box = Geom::BoundingBox.new
+        reset_bounds_state!
         return
       end
 
-      bbox = Geom::BoundingBox.new
-      bbox.add(Geom::Point3d.new(min_x, min_y, min_z))
-      bbox.add(Geom::Point3d.new(max_x, max_y, max_z))
-      @bounding_box = bbox
+      @bounds_min_x = min_x
+      @bounds_min_y = min_y
+      @bounds_min_z = min_z
+      @bounds_max_x = max_x
+      @bounds_max_y = max_y
+      @bounds_max_z = max_z
+
+      rebuild_bounding_box_from_bounds!
     end
 
     def compute_bounds!
-      return unless points && !points.empty?
-
-      bbox = Geom::BoundingBox.new
-      points.each { |pt| bbox.add(pt) }
-      @bounding_box = bbox
+      compute_bounds_efficient!(points)
     end
 
     def ensure_bounding_box_initialized!
+      return if @bounding_box
+
+      rebuild_bounding_box_from_bounds!
       @bounding_box ||= Geom::BoundingBox.new
     end
 

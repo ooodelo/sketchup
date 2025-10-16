@@ -54,9 +54,10 @@ module PointCloudImporter
 
       @points.length.times do |index|
         point = @points[index]
-        next unless point
+        coords = point_coordinates(point)
+        next unless coords
 
-        key = cell_key(point)
+        key = cell_key_from_coords(coords)
         @grid[key] << index
       end
     end
@@ -67,9 +68,10 @@ module PointCloudImporter
 
       @points.length.times do |index|
         point = @points[index]
-        next unless point
+        coords = point_coordinates(point)
+        next unless coords
 
-        neighbor_indices = neighbors_within(point, @curvature_radius)
+        neighbor_indices = neighbors_within(coords, @curvature_radius)
         next if neighbor_indices.length < 3
 
         centroid = compute_centroid(neighbor_indices)
@@ -106,25 +108,28 @@ module PointCloudImporter
 
     def mark_neighbors_unavailable(index, excluded)
       point = @points[index]
-      return unless point
+      coords = point_coordinates(point)
+      return unless coords
 
-      neighbors_within(point, @min_distance).each do |neighbor_index|
+      neighbors_within(coords, @min_distance).each do |neighbor_index|
         excluded[neighbor_index] = true
       end
     end
 
-    def neighbors_within(point, radius)
+    def neighbors_within(point_coords, radius)
       candidates = []
-      cell = cell_key(point)
+      cell = cell_key_from_coords(point_coords)
+      radius_sq = radius * radius
       each_neighbor_cell(cell) do |key|
         next unless @grid.key?(key)
 
         @grid[key].each do |index|
           candidate = @points[index]
-          next unless candidate
+          candidate_coords = point_coordinates(candidate)
+          next unless candidate_coords
 
-          distance = point.distance(candidate)
-          candidates << index if distance <= radius
+          distance_sq = squared_distance_coords(point_coords, candidate_coords)
+          candidates << index if distance_sq <= radius_sq
         end
       end
 
@@ -139,11 +144,12 @@ module PointCloudImporter
       count = 0
       indices.each do |index|
         point = @points[index]
-        next unless point
+        coords = point_coordinates(point)
+        next unless coords
 
-        sum_x += point.x
-        sum_y += point.y
-        sum_z += point.z
+        sum_x += coords[0]
+        sum_y += coords[1]
+        sum_z += coords[2]
         count += 1
       end
 
@@ -160,11 +166,12 @@ module PointCloudImporter
 
       indices.each do |index|
         point = @points[index]
-        next unless point
+        coords = point_coordinates(point)
+        next unless coords
 
-        dx = point.x - centroid.x
-        dy = point.y - centroid.y
-        dz = point.z - centroid.z
+        dx = coords[0] - centroid.x
+        dy = coords[1] - centroid.y
+        dz = coords[2] - centroid.z
 
         xx += dx * dx
         xy += dx * dy
@@ -201,11 +208,62 @@ module PointCloudImporter
     end
 
     def cell_key(point)
+      coords = point_coordinates(point)
+      return nil unless coords
+
+      cell_key_from_coords(coords)
+    end
+
+    def cell_key_from_coords(coords)
       [
-        (point.x / @cell_size).floor,
-        (point.y / @cell_size).floor,
-        (point.z / @cell_size).floor
+        (coords[0] / @cell_size).floor,
+        (coords[1] / @cell_size).floor,
+        (coords[2] / @cell_size).floor
       ]
+    end
+
+    AXIS_INDICES = { x: 0, y: 1, z: 2 }.freeze
+
+    def point_coordinate(point, axis)
+      return nil unless point
+
+      if point.respond_to?(axis)
+        value = point.public_send(axis)
+      elsif point.respond_to?(:[]) && AXIS_INDICES.key?(axis)
+        value = point[AXIS_INDICES[axis]]
+      end
+
+      return nil if value.nil?
+
+      value.to_f
+    rescue StandardError
+      nil
+    end
+
+    def point_coordinates(point)
+      return nil unless point
+
+      if point.respond_to?(:x) && point.respond_to?(:y) && point.respond_to?(:z)
+        [point.x.to_f, point.y.to_f, point.z.to_f]
+      elsif point.respond_to?(:[])
+        x = point[0]
+        y = point[1]
+        z = point[2]
+        return nil if x.nil? || y.nil? || z.nil?
+
+        [x.to_f, y.to_f, z.to_f]
+      else
+        nil
+      end
+    rescue StandardError
+      nil
+    end
+
+    def squared_distance_coords(a_coords, b_coords)
+      dx = a_coords[0] - b_coords[0]
+      dy = a_coords[1] - b_coords[1]
+      dz = a_coords[2] - b_coords[2]
+      (dx * dx) + (dy * dy) + (dz * dz)
     end
 
     def convert_length(meters)

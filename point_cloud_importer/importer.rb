@@ -75,7 +75,7 @@ module PointCloudImporter
           temp_intensities = nil
           total_vertices = 0
 
-          metadata = parser.parse(chunk_size: 500_000) do |points_chunk, colors_chunk, intensities_chunk, processed|
+          metadata = parser.parse(chunk_size: 1_000_000) do |points_chunk, colors_chunk, intensities_chunk, processed|
             next if job.cancel_requested?
 
             if points_chunk && !points_chunk.empty?
