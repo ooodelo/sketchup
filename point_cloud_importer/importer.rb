@@ -53,106 +53,91 @@ module PointCloudImporter
         formatted_options = options_text.empty? ? 'без опций' : options_text
         "Запуск импорта файла #{job.path.inspect} (#{formatted_options})"
       end
+
       progress_dialog = UI::ImportProgressDialog.new(job) { job.cancel! }
       progress_dialog.show
-      Logger.debug('Диалог прогресса отображен')
 
       worker = Thread.new do
         Thread.current.abort_on_exception = false
         begin
-          Logger.debug('Фоновый поток импорта запущен')
           job.start!
-          Logger.debug('Статус задания: running')
           job.update_progress(0.0, 'Чтение PLY...')
-          Logger.debug('Начато чтение PLY файла')
           start_time = Time.now
           parser = PlyParser.new(
             job.path,
             progress_callback: job.progress_callback,
             cancelled_callback: -> { job.cancel_requested? }
           )
-          Logger.debug('Создан экземпляр PlyParser')
 
-          metadata = {}
-          cloud = nil
-          processed_points = 0
+          name = File.basename(job.path, '.*')
+          temp_points = []
+          temp_colors = nil
+          temp_intensities = nil
           total_vertices = 0
 
-          metadata = parser.parse(chunk_size: PlyParser::DEFAULT_CHUNK_SIZE) do |points_chunk, colors_chunk, intensities_chunk, processed|
+          metadata = parser.parse(chunk_size: 500_000) do |points_chunk, colors_chunk, intensities_chunk, processed|
             next if job.cancel_requested?
 
-            cloud ||= begin
-              name = File.basename(job.path, '.*')
-              created = PointCloud.new(name: name, metadata: parser.metadata || {})
-              job.cloud = created
-              Logger.debug("Создан объект облака точек #{name}")
-              created
+            if points_chunk && !points_chunk.empty?
+              temp_points.concat(points_chunk)
             end
 
-            cloud.append_points!(points_chunk, colors_chunk, intensities_chunk)
-            processed_points = processed
+            if colors_chunk && !colors_chunk.empty?
+              temp_colors ||= []
+              temp_colors.concat(colors_chunk)
+            end
+
+            if intensities_chunk && !intensities_chunk.empty?
+              temp_intensities ||= []
+              temp_intensities.concat(intensities_chunk)
+            end
+
             total_vertices = parser.total_vertex_count.to_i
-            Logger.debug do
-              chunk_size = points_chunk.respond_to?(:length) ? points_chunk.length : 'unknown'
-              "Обработан блок точек (#{chunk_size}), всего обработано #{processed_points}"
-            end
-
-            progress_fraction = parser.estimated_progress.to_f
-            progress_fraction = [[progress_fraction, 0.0].max, 1.0].min
-            job.update_progress(progress_fraction, format_progress_message(processed_points, total_vertices))
+            fraction = if total_vertices.positive?
+                         processed.to_f / total_vertices
+                       else
+                         0.0
+                       end
+            job.update_progress(fraction, format_progress_message(processed, total_vertices))
           end
-          Logger.debug('Завершено чтение PLY файла')
-
-          cloud ||= begin
-            name = File.basename(job.path, '.*')
-            created = PointCloud.new(name: name, metadata: parser.metadata || metadata)
-            job.cloud = created
-            created
-          end
-
-          cloud.update_metadata!(metadata)
-          Logger.debug('Метаданные облака обновлены')
 
           if job.cancel_requested?
             job.mark_cancelled!
-            Logger.debug('Импорт отменен пользователем до завершения')
-          else
-            total_vertices = parser.total_vertex_count.to_i
-            total_vertices = cloud.points.length if total_vertices.zero?
-            job.complete!(
-              cloud: cloud,
-              metadata: metadata,
-              duration: Time.now - start_time,
-              total_vertices: total_vertices
-            )
-            Logger.debug('Импорт успешно завершен')
+            next
           end
+
+          cloud = PointCloud.new(name: name, metadata: parser.metadata || metadata)
+          cloud.set_points_bulk!(temp_points, temp_colors, temp_intensities)
+          cloud.update_metadata!(metadata)
+
+          total_vertices = parser.total_vertex_count.to_i
+          total_vertices = temp_points.length if total_vertices.zero?
+
+          job.complete!(
+            cloud: cloud,
+            metadata: metadata,
+            duration: Time.now - start_time,
+            total_vertices: total_vertices
+          )
         rescue PlyParser::Cancelled
           job.mark_cancelled!
-          Logger.debug('Парсер сообщил об отмене импорта')
         rescue PlyParser::UnsupportedFormat => e
           job.fail!(e)
-          Logger.debug("Ошибка формата PLY: #{e.message}")
         rescue StandardError => e
           job.fail!(e)
-          Logger.debug("Необработанная ошибка импорта: #{e.class}: #{e.message}")
         end
       end
 
       job.thread = worker
-      Logger.debug('Фоновый поток сохранен в задании')
 
       timer_id = nil
       timer_id = ::UI.start_timer(0.1, repeat: true) do
         progress_dialog.update
-        Logger.debug('Обновление диалога прогресса')
         next unless job.finished?
 
         ::UI.stop_timer(timer_id) if timer_id
         progress_dialog.close
-        Logger.debug('Диалог прогресса закрыт')
         job.thread&.join
-        Logger.debug('Фоновый поток завершен')
         finalize_job(job)
       end
     end
@@ -161,21 +146,14 @@ module PointCloudImporter
       Logger.debug { "Финализация задания со статусом #{job.status.inspect}" }
       case job.status
       when :completed
-        create_cloud(job)
+        finalize_completed_job(job)
       when :failed
         cleanup_partial_cloud(job)
-        Logger.debug do
-          error = job.error
-          next 'Сообщение об ошибке отсутствует' unless error
-
-          backtrace = Array(error.backtrace).first(5).join(' | ')
-          "Задание завершилось ошибкой: #{error.class}: #{error.message} (#{backtrace})"
-        end
+        log_failure_details(job)
         @last_result = nil
         ::UI.messagebox("Ошибка импорта: #{job.error.message}") if job.error
       when :cancelled
         cleanup_partial_cloud(job)
-        Logger.debug('Задание отменено пользователем при финализации')
         @last_result = nil
         ::UI.messagebox('Импорт отменен пользователем.')
       else
@@ -183,12 +161,8 @@ module PointCloudImporter
       end
     end
 
-    def create_cloud(job)
+    def finalize_completed_job(job)
       data = job.result
-      Logger.debug do
-        available_keys = data ? data.keys : []
-        "Создание облака из результата задания. Ключи: #{available_keys.inspect}"
-      end
       cloud = data[:cloud]
       metadata = data[:metadata]
       duration = data[:duration]
@@ -197,17 +171,20 @@ module PointCloudImporter
       raise ArgumentError, 'PLY файл не содержит точек' unless cloud && cloud.points && cloud.points.length.positive?
 
       cloud.update_metadata!(metadata)
-      Logger.debug do
-        point_count = cloud.points ? cloud.points.length : 0
-        "Облако обновлено метаданными. Точек: #{point_count}"
-      end
       apply_visual_options(cloud, job.options)
-      cloud.prepare_render_cache!
-      Logger.debug('Готов кэш отрисовки облака точек')
 
       unless job.cloud_added?
         @manager.add_cloud(cloud)
         job.mark_cloud_added!
+      end
+
+      Thread.new do
+        begin
+          cloud.prepare_render_cache!
+          @manager.view&.invalidate
+        rescue StandardError
+          # Ignore background cache errors
+        end
       end
 
       ::UI.messagebox(
@@ -221,6 +198,16 @@ module PointCloudImporter
       @last_result = nil
       ::UI.messagebox("Ошибка импорта: #{e.message}")
       nil
+    end
+
+    def log_failure_details(job)
+      Logger.debug do
+        error = job.error
+        next 'Сообщение об ошибке отсутствует' unless error
+
+        backtrace = Array(error.backtrace).first(5).join(' | ')
+        "Задание завершилось ошибкой: #{error.class}: #{error.message} (#{backtrace})"
+      end
     end
 
     def apply_visual_options(cloud, options)

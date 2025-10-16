@@ -193,7 +193,7 @@ module PointCloudImporter
       @display_density = normalized
       settings = Settings.instance
       settings[:density] = @display_density
-      build_display_cache!
+      invalidate_display_cache!
       refresh_inference_guides!
     end
 
@@ -332,7 +332,7 @@ module PointCloudImporter
       @max_display_points = candidate
       settings = Settings.instance
       settings[:max_display_points] = @max_display_points
-      build_display_cache!
+      invalidate_display_cache!
       refresh_inference_guides!
     end
 
@@ -343,6 +343,7 @@ module PointCloudImporter
     end
 
     def draw(view)
+      build_display_cache! if @display_cache_dirty || @lod_caches.nil?
       ensure_display_caches!
       caches = @lod_caches
       return unless caches && !caches.empty?
@@ -644,6 +645,46 @@ module PointCloudImporter
         @colors.nil? &&
         caches_cleared? &&
         @bounding_box.nil?
+    end
+
+    def set_points_bulk!(points_array, colors_array = nil, intensities_array = nil)
+      points_array ||= []
+      colors_array = nil if colors_array&.empty?
+      intensities_array = nil if intensities_array&.empty?
+
+      @points.clear
+      points_array.each_slice(@points.chunk_capacity) do |slice|
+        @points.append_chunk(slice)
+      end
+
+      if colors_array
+        @colors ||= ChunkedArray.new(@points.chunk_capacity)
+        @colors.clear
+        colors_array.each_slice(@colors.chunk_capacity) do |slice|
+          @colors.append_chunk(slice)
+        end
+      else
+        @colors = nil
+      end
+
+      if intensities_array
+        @intensities ||= ChunkedArray.new(@points.chunk_capacity)
+        @intensities.clear
+        @intensity_min = nil
+        @intensity_max = nil
+        intensities_array.each_slice(@intensities.chunk_capacity) do |slice|
+          @intensities.append_chunk(slice)
+          update_intensity_range!(slice)
+        end
+      else
+        @intensities = nil
+        @intensity_min = nil
+        @intensity_max = nil
+      end
+
+      compute_bounds_efficient!(points_array)
+      invalidate_display_cache!
+      self
     end
 
     def append_points!(points_chunk, colors_chunk = nil, intensities_chunk = nil)
@@ -1413,6 +1454,45 @@ module PointCloudImporter
 
       yield(range_start, previous_index)
       indices.clear
+    end
+
+    def compute_bounds_efficient!(points)
+      if points.nil? || points.empty?
+        @bounding_box = Geom::BoundingBox.new
+        return
+      end
+
+      min_x = Float::INFINITY
+      min_y = Float::INFINITY
+      min_z = Float::INFINITY
+      max_x = -Float::INFINITY
+      max_y = -Float::INFINITY
+      max_z = -Float::INFINITY
+
+      points.each do |point|
+        next unless point
+
+        x = point.x
+        y = point.y
+        z = point.z
+
+        min_x = x if x < min_x
+        max_x = x if x > max_x
+        min_y = y if y < min_y
+        max_y = y if y > max_y
+        min_z = z if z < min_z
+        max_z = z if z > max_z
+      end
+
+      if min_x == Float::INFINITY
+        @bounding_box = Geom::BoundingBox.new
+        return
+      end
+
+      bbox = Geom::BoundingBox.new
+      bbox.add(Geom::Point3d.new(min_x, min_y, min_z))
+      bbox.add(Geom::Point3d.new(max_x, max_y, max_z))
+      @bounding_box = bbox
     end
 
     def compute_bounds!

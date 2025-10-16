@@ -150,10 +150,6 @@ module PointCloudImporter
         @message = text if text
         @last_progress_time = now
       end
-      Logger.debug do
-        progress_text = clamped_fraction ? format('%.2f%%', clamped_fraction * 100) : 'n/a'
-        "Прогресс обновлен: #{progress_text} — #{text || @message}"
-      end
     end
 
     def progress_callback
