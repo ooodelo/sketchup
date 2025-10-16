@@ -12,8 +12,8 @@ module PointCloudImporter
 
     DEFAULT_CHUNK_SIZE = 100_000
     PROGRESS_REPORT_INTERVAL = 0.5
-    THREAD_YIELD_INTERVAL = 500_000
-    BINARY_READ_BUFFER_SIZE = 8 * 1024 * 1024
+    THREAD_YIELD_INTERVAL = 10_000
+    BINARY_READ_BUFFER_SIZE = 1_048_576
 
 
     TYPE_MAP = {
@@ -242,7 +242,7 @@ module PointCloudImporter
       parse_binary_with_endian(io, header, :big, chunk_size, &block)
     end
 
-    def parse_binary_with_endian(io, header, endian, _chunk_size, &block)
+    def parse_binary_with_endian(io, header, endian, chunk_size, &block)
       vertex_count = header[:vertex_count] ? header[:vertex_count].to_i : 0
       properties = header[:properties]
       property_index_by_name = header[:property_index_by_name]
@@ -250,22 +250,22 @@ module PointCloudImporter
       intensity_index = intensity_property_index(property_index_by_name)
 
       stride = properties.sum { |property| bytesize(property[:type]) }
-      buffer_size = [BINARY_READ_BUFFER_SIZE, stride].max
-      vertices_per_buffer = [buffer_size / stride, 1].max
+      chunk_size = [chunk_size.to_i, 1].max
+      max_vertices_per_buffer = [BINARY_READ_BUFFER_SIZE / stride, 1].max
 
       processed = 0
+
+      points_chunk = []
+      colors_chunk = color_indices ? [] : nil
+      intensities_chunk = intensity_index ? [] : nil
 
       while processed < vertex_count
         check_cancelled!
         remaining = vertex_count - processed
-        batch_size = [vertices_per_buffer, remaining].min
+        batch_size = [max_vertices_per_buffer, remaining].min
         bytes_to_read = stride * batch_size
         raw_data = io.read(bytes_to_read)
         break unless raw_data && raw_data.bytesize == bytes_to_read
-
-        points_batch = []
-        colors_batch = color_indices ? [] : nil
-        intensities_batch = intensity_index ? [] : nil
 
         offset = 0
         batch_size.times do
@@ -275,17 +275,26 @@ module PointCloudImporter
           values = unpack_binary(vertex_slice, properties, endian: endian)
           point, color, intensity = interpret_vertex(values, property_index_by_name, color_indices, intensity_index)
 
-          points_batch << point
-          colors_batch << color if colors_batch
-          intensities_batch << intensity if intensities_batch
+          points_chunk << point
+          colors_chunk << color if colors_chunk
+          intensities_chunk << intensity if intensities_chunk
+
+          processed += 1
+
+          Thread.pass if (processed % THREAD_YIELD_INTERVAL).zero? && processed.positive?
+
+          if points_chunk.length >= chunk_size
+            emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
+            points_chunk = []
+            colors_chunk = color_indices ? [] : nil
+            intensities_chunk = intensity_index ? [] : nil
+          end
         end
 
-        processed += batch_size
-
-        emit_chunk(points_batch, colors_batch, intensities_batch, processed, block)
         update_progress(processed_vertices: processed, consumed_bytes: bytes_to_read)
       end
 
+      emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
       report_progress(force: true)
     end
 
