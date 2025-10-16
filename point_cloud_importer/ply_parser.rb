@@ -2,6 +2,8 @@
 
 require 'stringio'
 
+require_relative 'progress_estimator'
+
 module PointCloudImporter
     # Parser for PLY point cloud files (ASCII, binary little endian or binary big endian).
   class PlyParser
@@ -51,7 +53,7 @@ module PointCloudImporter
     BLUE_PROPERTY_NAMES = %w[blue diffuse_blue b].freeze
     INTENSITY_PROPERTY_NAMES = %w[intensity intensity_0 reflectance greyscale].freeze
 
-    attr_reader :path, :total_vertex_count, :metadata
+    attr_reader :path, :total_vertex_count, :metadata, :data_bytes_total, :data_bytes_processed
 
     def initialize(path, progress_callback: nil, cancelled_callback: nil)
       @path = path
@@ -59,6 +61,12 @@ module PointCloudImporter
       @cancelled_callback = cancelled_callback
       @total_vertex_count = 0
       @metadata = {}
+      @file_size = safe_file_size(path)
+      @data_start_offset = 0
+      @data_bytes_total = nil
+      @data_bytes_processed = 0
+      @progress_estimator = nil
+      @last_reported_fraction = nil
     end
 
     def parse(chunk_size: DEFAULT_CHUNK_SIZE, &block)
@@ -91,6 +99,15 @@ module PointCloudImporter
         @total_vertex_count = header[:vertex_count] ? header[:vertex_count].to_i : 0
         @metadata = header[:metadata] || {}
 
+        @data_start_offset = safe_io_position(io)
+        @data_bytes_total = compute_data_bytes_total
+        @progress_estimator = ProgressEstimator.new(
+          total_vertices: @total_vertex_count,
+          data_bytes_total: @data_bytes_total
+        )
+        @data_bytes_processed = 0
+        @last_reported_fraction = nil
+
         validate_header!(header)
 
         case header[:format]
@@ -114,17 +131,16 @@ module PointCloudImporter
       end
     end
 
+    def estimated_progress(processed_vertices)
+      return nil unless @progress_estimator
+
+      @progress_estimator.fraction(
+        processed_vertices: processed_vertices,
+        data_bytes_processed: @data_bytes_processed
+      )
+    end
+
     private
-
-    def cancelled?
-      @cancelled_callback && @cancelled_callback.call
-    rescue StandardError
-      false
-    end
-
-    def check_cancelled!
-      raise Cancelled if cancelled?
-    end
 
     def parse_header(io)
       header = { properties: [], metadata: {} }
@@ -185,9 +201,8 @@ module PointCloudImporter
       intensities_chunk = intensity_index ? [] : nil
       processed = 0
 
-      vertex_count.times do |index|
+      vertex_count.times do
         check_cancelled!
-        report(index, vertex_count)
         line = io.gets
         break unless line
 
@@ -198,6 +213,9 @@ module PointCloudImporter
         intensities_chunk << intensity if intensities_chunk
         processed += 1
 
+        update_data_progress(io)
+        report(processed, vertex_count)
+
         next unless points_chunk.length >= chunk_size
 
         emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
@@ -206,7 +224,9 @@ module PointCloudImporter
         intensities_chunk = intensity_index ? [] : nil
       end
 
+      update_data_progress(io)
       emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
+      finalize_data_progress
     end
 
     def parse_binary(io, header, chunk_size, &block)
@@ -232,9 +252,8 @@ module PointCloudImporter
       intensities_chunk = intensity_index ? [] : nil
       processed = 0
 
-      vertex_count.times do |index|
+      vertex_count.times do
         check_cancelled!
-        report(index, vertex_count)
         data = io.read(stride)
         break unless data && data.length == stride
 
@@ -246,6 +265,9 @@ module PointCloudImporter
         intensities_chunk << intensity if intensities_chunk
         processed += 1
 
+        update_data_progress(io)
+        report(processed, vertex_count)
+
         next unless points_chunk.length >= chunk_size
 
         emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
@@ -254,18 +276,9 @@ module PointCloudImporter
         intensities_chunk = intensity_index ? [] : nil
       end
 
+      update_data_progress(io)
       emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
-    end
-
-    def emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
-      return if points_chunk.nil? || points_chunk.empty?
-
-      colors_arg = colors_chunk
-      colors_arg = nil if colors_arg.is_a?(Array) && colors_arg.empty?
-      intensities_arg = intensities_chunk
-      intensities_arg = nil if intensities_arg.is_a?(Array) && intensities_arg.empty?
-
-      block&.call(points_chunk, colors_arg, intensities_arg, processed)
+      finalize_data_progress
     end
 
     def interpret_vertex(values, property_index_by_name, color_indices, intensity_index)
@@ -353,16 +366,98 @@ module PointCloudImporter
       raise UnsupportedFormat, "Отсутствуют обязательные координаты: #{missing.join(', ')}"
     end
 
-    def report(current, total)
+    def emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
+      return if points_chunk.nil? || points_chunk.empty?
+
+      colors_arg = colors_chunk
+      colors_arg = nil if colors_arg.is_a?(Array) && colors_arg.empty?
+      intensities_arg = intensities_chunk
+      intensities_arg = nil if intensities_arg.is_a?(Array) && intensities_arg.empty?
+
+      block&.call(points_chunk, colors_arg, intensities_arg, processed)
+    end
+
+    def update_data_progress(io)
+      return unless @data_start_offset
+
+      position = safe_io_position(io)
+      return unless position
+
+      processed = position - @data_start_offset
+      processed = 0 if processed.negative?
+      @data_bytes_processed = processed
+    end
+
+    def finalize_data_progress
+      return unless @data_bytes_total
+
+      @data_bytes_processed = @data_bytes_total if @data_bytes_processed < @data_bytes_total
+    end
+
+    def report(processed, total)
       check_cancelled!
       return unless @progress_callback
-      return if total <= 0
 
-      step = [total / 100, 1].max
-      return unless (current % step).zero? || current == total - 1
+      fraction = progress_fraction_for_reporting(processed, total)
+      return unless fraction
 
-      fraction = (current.to_f / [total - 1, 1].max)
+      @last_reported_fraction = fraction
       @progress_callback.call(fraction, nil)
+    end
+
+    def progress_fraction_for_reporting(processed, total)
+      if total.to_i.positive?
+        step = [total / 100, 1].max
+        return nil unless (processed % step).zero? || processed >= total
+
+        ratio = processed.to_f / total
+        return [[ratio, 0.0].max, 1.0].min
+      end
+
+      fraction = progress_fraction(processed)
+      return nil unless fraction
+
+      return nil if @last_reported_fraction && (fraction - @last_reported_fraction).abs < 1e-4
+
+      fraction
+    end
+
+    def progress_fraction(processed_vertices)
+      return nil unless @progress_estimator
+
+      @progress_estimator.fraction(
+        processed_vertices: processed_vertices,
+        data_bytes_processed: @data_bytes_processed
+      )
+    end
+
+    def check_cancelled!
+      raise Cancelled if cancelled?
+    end
+
+    def cancelled?
+      @cancelled_callback && @cancelled_callback.call
+    rescue StandardError
+      false
+    end
+
+    def safe_file_size(path)
+      File.size(path)
+    rescue StandardError
+      nil
+    end
+
+    def safe_io_position(io)
+      io.pos
+    rescue IOError, SystemCallError
+      nil
+    end
+
+    def compute_data_bytes_total
+      return nil unless @file_size && @data_start_offset
+
+      total = @file_size - @data_start_offset
+      total.positive? ? total : nil
     end
   end
 end

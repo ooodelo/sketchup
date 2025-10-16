@@ -142,8 +142,14 @@ module PointCloudImporter
       @mutex.synchronize do
         return if finished_locked?
 
-        if clamped_fraction && clamped_fraction < 1.0 && (now - @last_progress_time) < MIN_PROGRESS_INTERVAL
-          return if !text || text == @message
+        previous_progress = @progress
+        should_rate_limit =
+          clamped_fraction && clamped_fraction < 1.0 && (now - @last_progress_time) < MIN_PROGRESS_INTERVAL
+        progress_changed =
+          !clamped_fraction.nil? && (previous_progress.nil? || (clamped_fraction - previous_progress).abs >= 1e-6)
+
+        if should_rate_limit && !progress_changed && (!text || text == @message)
+          return
         end
 
         @progress = clamped_fraction unless clamped_fraction.nil?

@@ -76,7 +76,7 @@ module PointCloudImporter
           metadata = {}
           cloud = nil
           processed_points = 0
-          total_vertices = 0
+          declared_total_vertices = 0
 
           metadata = parser.parse(chunk_size: PlyParser::DEFAULT_CHUNK_SIZE) do |points_chunk, colors_chunk, intensities_chunk, processed|
             next if job.cancel_requested?
@@ -91,15 +91,17 @@ module PointCloudImporter
 
             cloud.append_points!(points_chunk, colors_chunk, intensities_chunk)
             processed_points = processed
-            total_vertices = parser.total_vertex_count.to_i
-            total_vertices = processed_points if total_vertices.zero?
+            declared_total_vertices = parser.total_vertex_count.to_i
             Logger.debug do
               chunk_size = points_chunk.respond_to?(:length) ? points_chunk.length : 'unknown'
               "Обработан блок точек (#{chunk_size}), всего обработано #{processed_points}"
             end
 
-            progress_fraction = total_vertices.positive? ? (processed_points.to_f / total_vertices) : 0.0
-            job.update_progress(progress_fraction, format_progress_message(processed_points, total_vertices))
+            progress_fraction = parser.estimated_progress(processed_points) || 0.0
+            job.update_progress(
+              progress_fraction,
+              format_progress_message(processed_points, declared_total_vertices)
+            )
           end
           Logger.debug('Завершено чтение PLY файла')
 
