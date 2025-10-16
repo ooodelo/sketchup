@@ -236,7 +236,12 @@ module PointCloudImporter
               @manager.view&.invalidate
             end
           when :finalize_cloud
-            next if job.cancel_requested? || job.finished?
+            next if job.finished?
+
+            if job.cancel_requested?
+              job.mark_cancelled!
+              next
+            end
 
             cloud = cloud_context[:cloud]
             next unless cloud
