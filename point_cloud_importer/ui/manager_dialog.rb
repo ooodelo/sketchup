@@ -13,6 +13,7 @@ module PointCloudImporter
       def initialize(manager)
         @manager = manager
         settings = Settings.instance
+        @auto_apply_enabled = settings[:auto_apply_changes] != false
         @dialog = ::UI::HtmlDialog.new(
           dialog_title: 'Менеджер облаков точек',
           preferences_key: 'PointCloudImporter::ManagerDialog',
@@ -53,13 +54,28 @@ module PointCloudImporter
           @manager.view&.invalidate
           refresh
         end
+        @dialog.add_action_callback('pci_preview_density') do |_, cloud_index, value|
+          cloud = validate_cloud_index(cloud_index)
+          next unless cloud
+
+          cloud.preview_density(value)
+          @manager.view&.invalidate
+        end
         @dialog.add_action_callback('pci_density') do |_, cloud_index, value|
           cloud = validate_cloud_index(cloud_index)
           next unless cloud
 
           cloud.density = value.to_f
           @manager.view&.invalidate
+          auto_apply_preferences_if_needed
           refresh
+        end
+        @dialog.add_action_callback('pci_preview_point_size') do |_, cloud_index, value|
+          cloud = validate_cloud_index(cloud_index)
+          next unless cloud
+
+          cloud.preview_point_size(value)
+          @manager.view&.invalidate
         end
         @dialog.add_action_callback('pci_point_size') do |_, cloud_index, value|
           cloud = validate_cloud_index(cloud_index)
@@ -67,6 +83,7 @@ module PointCloudImporter
 
           cloud.point_size = value.to_i
           @manager.view&.invalidate
+          auto_apply_preferences_if_needed
           refresh
         end
         @dialog.add_action_callback('pci_toggle_inference') do |_, cloud_index|
@@ -96,6 +113,9 @@ module PointCloudImporter
         @dialog.add_action_callback('pci_apply_preferences') do
           Settings.instance.save!
         end
+        @dialog.add_action_callback('pci_set_auto_apply') do |_, enabled|
+          self.auto_apply_enabled = enabled.to_s == 'true'
+        end
       end
 
       def refresh
@@ -113,7 +133,8 @@ module PointCloudImporter
               octree_debug: cloud.octree_debug_enabled?,
               octree_stats: cloud.last_octree_query_stats
             }
-          end
+          end,
+          auto_apply: auto_apply_enabled?
         }
         @dialog.execute_script("window.pci && window.pci.update(#{JSON.generate(payload)});")
       end
@@ -126,6 +147,25 @@ module PointCloudImporter
         end
 
         @manager.clouds[cloud_index]
+      end
+
+      def auto_apply_enabled?
+        !!@auto_apply_enabled
+      end
+
+      def auto_apply_enabled=(value)
+        @auto_apply_enabled = !!value
+        settings = Settings.instance
+        settings[:auto_apply_changes] = @auto_apply_enabled
+        settings.save!(:auto_apply_changes, immediate: true)
+        Settings.instance.save! if @auto_apply_enabled
+        refresh
+      end
+
+      def auto_apply_preferences_if_needed
+        return unless auto_apply_enabled?
+
+        Settings.instance.save!
       end
     end
   end
