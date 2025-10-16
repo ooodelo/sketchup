@@ -120,6 +120,7 @@ module PointCloudImporter
       @intensity_max = nil
       @random_seed = deterministic_seed_for(name)
       @bounding_box = Geom::BoundingBox.new
+      @display_cache_dirty = false
       append_points!(points, colors, intensities) if points && !points.empty?
 
       @inference_sample_indices = nil
@@ -146,6 +147,7 @@ module PointCloudImporter
     end
 
     def clear_cache!
+      @display_cache_dirty = true
       @display_points = nil
       @display_colors = nil
       @display_index_lookup = nil
@@ -335,7 +337,7 @@ module PointCloudImporter
     end
 
     def prepare_render_cache!
-      build_display_cache!
+      build_display_cache! if @display_cache_dirty || @lod_caches.nil?
       refresh_inference_guides!
       self
     end
@@ -620,7 +622,7 @@ module PointCloudImporter
         end
       end
 
-      invalidate_display_cache!
+      mark_display_cache_dirty!
     end
 
     def caches_cleared?
@@ -661,7 +663,7 @@ module PointCloudImporter
       ensure_bounding_box_initialized!
       points_chunk.each { |point| @bounding_box.add(point) }
 
-      invalidate_display_cache!
+      mark_display_cache_dirty!
     end
 
     def update_metadata!(metadata)
@@ -669,6 +671,12 @@ module PointCloudImporter
     end
 
     private
+
+    def mark_display_cache_dirty!
+      return if @display_cache_dirty
+
+      invalidate_display_cache!
+    end
 
     DRAW_BATCH_SIZE = 250_000
     MAX_INFERENCE_GUIDES = 50_000
@@ -931,6 +939,7 @@ module PointCloudImporter
     end
 
     def build_display_cache!
+      @display_cache_dirty = false
       @spatial_index = nil
       clear_octree!
       reset_frustum_cache!
@@ -1178,6 +1187,7 @@ module PointCloudImporter
     end
 
     def invalidate_display_cache!
+      @display_cache_dirty = true
       @display_points = nil
       @display_colors = nil
       @display_index_lookup = nil

@@ -146,14 +146,6 @@ module PointCloudImporter
       timer_id = ::UI.start_timer(0.1, repeat: true) do
         progress_dialog.update
         Logger.debug('Обновление диалога прогресса')
-        unless job.cloud_added?
-          cloud = job.cloud
-          if cloud && cloud.points && cloud.points.length.positive?
-            @manager.add_cloud(cloud)
-            job.mark_cloud_added!
-            Logger.debug('Облако добавлено в менеджер')
-          end
-        end
         next unless job.finished?
 
         ::UI.stop_timer(timer_id) if timer_id

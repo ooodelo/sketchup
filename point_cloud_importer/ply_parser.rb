@@ -9,6 +9,8 @@ module PointCloudImporter
     Cancelled = Class.new(StandardError)
 
     DEFAULT_CHUNK_SIZE = 100_000
+    PROGRESS_REPORT_INTERVAL = 0.3
+    THREAD_YIELD_INTERVAL = 10_000
 
 
     TYPE_MAP = {
@@ -59,6 +61,7 @@ module PointCloudImporter
       @cancelled_callback = cancelled_callback
       @total_vertex_count = 0
       @metadata = {}
+      @last_report_time = monotonic_time - PROGRESS_REPORT_INTERVAL
     end
 
     def parse(chunk_size: DEFAULT_CHUNK_SIZE, &block)
@@ -188,6 +191,7 @@ module PointCloudImporter
       vertex_count.times do |index|
         check_cancelled!
         report(index, vertex_count)
+        Thread.pass if (index % THREAD_YIELD_INTERVAL).zero? && index.positive?
         line = io.gets
         break unless line
 
@@ -235,6 +239,7 @@ module PointCloudImporter
       vertex_count.times do |index|
         check_cancelled!
         report(index, vertex_count)
+        Thread.pass if (index % THREAD_YIELD_INTERVAL).zero? && index.positive?
         data = io.read(stride)
         break unless data && data.length == stride
 
@@ -358,11 +363,25 @@ module PointCloudImporter
       return unless @progress_callback
       return if total <= 0
 
-      step = [total / 100, 1].max
-      return unless (current % step).zero? || current == total - 1
+      now = monotonic_time
+      emit = (current == total - 1)
+      emit ||= (now - @last_report_time) >= PROGRESS_REPORT_INTERVAL
+      return unless emit
 
-      fraction = (current.to_f / [total - 1, 1].max)
+      processed = [current + 1, total].min
+      fraction = total.positive? ? (processed.to_f / total) : 0.0
+      @last_report_time = now
       @progress_callback.call(fraction, nil)
+    end
+
+    def monotonic_time
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    rescue NameError, Errno::EINVAL
+      Process.clock_gettime(:float_second)
+    rescue NameError, ArgumentError, Errno::EINVAL
+      Process.clock_gettime(Process::CLOCK_REALTIME)
+    rescue NameError, Errno::EINVAL
+      Time.now.to_f
     end
   end
 end
