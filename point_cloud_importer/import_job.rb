@@ -22,13 +22,13 @@ module PointCloudImporter
       @cloud = nil
       @cloud_added = false
       @mutex = Mutex.new
-      @last_progress_time = Process.clock_gettime(:float_second) - MIN_PROGRESS_INTERVAL
+      @last_progress_time = monotonic_time - MIN_PROGRESS_INTERVAL
     end
 
     def start!
       @mutex.synchronize do
         @status = :running
-        @last_progress_time = Process.clock_gettime(:float_second) - MIN_PROGRESS_INTERVAL
+        @last_progress_time = monotonic_time - MIN_PROGRESS_INTERVAL
       end
     end
 
@@ -129,7 +129,7 @@ module PointCloudImporter
 
     def update_progress(fraction, text)
       clamped_fraction = clamp_fraction(fraction)
-      now = Process.clock_gettime(:float_second)
+      now = monotonic_time
 
       @mutex.synchronize do
         return if finished?
@@ -158,6 +158,20 @@ module PointCloudImporter
       [[value.to_f, 0.0].max, 1.0].min
     rescue StandardError
       nil
+    end
+
+    def monotonic_time
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    rescue NameError, Errno::EINVAL
+      clock_gettime_fallback
+    end
+
+    def clock_gettime_fallback
+      Process.clock_gettime(:float_second)
+    rescue NameError, ArgumentError, Errno::EINVAL
+      Process.clock_gettime(Process::CLOCK_REALTIME)
+    rescue NameError, Errno::EINVAL
+      Time.now.to_f
     end
   end
 end
