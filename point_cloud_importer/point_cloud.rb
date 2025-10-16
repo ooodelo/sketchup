@@ -367,6 +367,11 @@ module PointCloudImporter
       end
 
       finalize_lod_transition! if progress >= 1.0
+
+      # Optional debug visualization of octree (instance-level)
+      if octree_debug_enabled? && @octree && @octree.respond_to?(:draw_debug)
+        @octree.draw_debug(view)
+      end
     end
 
     def nearest_point(target)
@@ -1611,6 +1616,9 @@ module PointCloudImporter
     end
 
     class << self
+      # Guard: class-level stub to avoid accidental calls in class context
+      def octree_debug_enabled?; false; end
+
       def style_constants
         @style_constants ||= compute_style_constants
       end
@@ -1698,14 +1706,9 @@ module PointCloudImporter
             end
           rescue StandardError => e
             warn("[PointCloudImporter] Ошибка финализатора для облака '#{info[:name]}': #{e.message}")
+          end
         end
       end
-
-      if octree_debug_enabled?
-        octree = ensure_octree_for_cache(cache)
-        octree&.draw_debug(view)
-      end
-    end
 
       def lingering_references(info)
         [].tap do |refs|
