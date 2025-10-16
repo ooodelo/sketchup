@@ -16,6 +16,18 @@ module PointCloudImporter
       @processed_bytes = 0
     end
 
+    def update_totals(total_vertices: nil, total_bytes: nil)
+      if total_vertices
+        normalized = normalize_total(total_vertices)
+        @total_vertices = normalized if normalized.positive?
+      end
+
+      return unless total_bytes
+
+      normalized = normalize_total(total_bytes)
+      @total_bytes = normalized if normalized.positive?
+    end
+
     def update(processed_vertices: nil, consumed_bytes: nil)
       if processed_vertices
         @processed_vertices = [processed_vertices.to_i, @processed_vertices].max

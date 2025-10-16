@@ -3,11 +3,12 @@
 require 'thread'
 
 require_relative 'logger'
+require_relative 'progress_estimator'
 
 module PointCloudImporter
   # Represents a background import job with shared state between threads.
   class ImportJob
-    MIN_PROGRESS_INTERVAL = 0.1
+    MIN_PROGRESS_INTERVAL = 0.25
 
     attr_reader :path, :options
     attr_accessor :thread
@@ -26,6 +27,7 @@ module PointCloudImporter
       @mutex = Mutex.new
       @last_progress_time = monotonic_time - MIN_PROGRESS_INTERVAL
       @processed_vertices = 0
+      @progress_estimator = ProgressEstimator.new
       Logger.debug { "Создано задание импорта для #{path.inspect}" }
     end
 
@@ -136,16 +138,57 @@ module PointCloudImporter
       status == :cancelled
     end
 
-    def update_progress(fraction = nil, text = nil, processed_vertices: nil)
-      clamped_fraction = fraction.nil? ? nil : clamp_fraction(fraction)
-      message = text
+    def update_progress(*args, **kwargs)
+      fraction = args[0]
+      text = args[1]
+
+      message = if kwargs.key?(:message)
+                  kwargs.delete(:message)
+                else
+                  text
+                end
+
+      processed_vertices = kwargs.delete(:processed_vertices)
+      total_vertices = kwargs.delete(:total_vertices)
+      total_bytes = kwargs.delete(:total_bytes)
+      consumed_bytes = kwargs.delete(:consumed_bytes)
+      force = kwargs.delete(:force)
+      fraction_override = kwargs.delete(:fraction)
+
+      fraction ||= fraction_override
+      force ||= false
+
       now = monotonic_time
 
       @mutex.synchronize do
         return if finished_locked?
 
-        if clamped_fraction && clamped_fraction < 1.0 && (now - @last_progress_time) < MIN_PROGRESS_INTERVAL
-          return if (!message || message == @message) && processed_vertices.nil?
+        @progress_estimator.update_totals(
+          total_vertices: total_vertices,
+          total_bytes: total_bytes
+        ) if total_vertices || total_bytes
+
+        if processed_vertices || consumed_bytes
+          @progress_estimator.update(
+            processed_vertices: processed_vertices,
+            consumed_bytes: consumed_bytes
+          )
+        end
+
+        estimated_fraction = @progress_estimator.fraction
+        clamped_fraction = estimated_fraction.nil? ? nil : clamp_fraction(estimated_fraction)
+
+        if clamped_fraction.nil? && !fraction.nil?
+          clamped_fraction = clamp_fraction(fraction)
+        end
+
+        throttled = !force && (now - @last_progress_time) < MIN_PROGRESS_INTERVAL
+        throttled &&= clamped_fraction && clamped_fraction < 1.0
+        throttled &&= message.nil? || message == @message
+
+        if throttled
+          @processed_vertices = [processed_vertices.to_i, @processed_vertices].max if processed_vertices
+          return
         end
 
         @processed_vertices = [processed_vertices.to_i, @processed_vertices].max if processed_vertices
@@ -156,8 +199,8 @@ module PointCloudImporter
     end
 
     def progress_callback
-      lambda do |fraction, text|
-        update_progress(fraction, text)
+      lambda do |*args, **kwargs|
+        update_progress(*args, **kwargs)
       end
     end
 
