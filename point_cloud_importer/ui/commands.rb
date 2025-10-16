@@ -41,6 +41,13 @@ module PointCloudImporter
         add_toolbar
       end
 
+      def refresh_panel_if_visible
+        return unless @panel
+        return unless @panel.visible?
+
+        @panel.refresh!
+      end
+
       private
 
       def ensure_commands!
@@ -125,12 +132,6 @@ module PointCloudImporter
         File.expand_path(File.join('icons', name), __dir__)
       end
 
-      def refresh_panel_if_visible
-        return unless @panel
-        return unless @panel.visible?
-
-        @panel.refresh!
-      end
     end
   end
 end

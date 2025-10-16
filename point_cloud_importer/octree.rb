@@ -562,11 +562,11 @@ module PointCloudImporter
         Geom::Point3d.new(min.x, min.y, min.z),
         Geom::Point3d.new(max.x, min.y, min.z),
         Geom::Point3d.new(min.x, max.y, min.z),
-        Geom::Point3d.new(max.x, max_y, min.z),
+        Geom::Point3d.new(max.x, max.y, min.z),
         Geom::Point3d.new(min.x, min.y, max.z),
         Geom::Point3d.new(max.x, min.y, max.z),
         Geom::Point3d.new(min.x, max.y, max.z),
-        Geom::Point3d.new(max.x, max_y, max.z)
+        Geom::Point3d.new(max.x, max.y, max.z)
       ]
     end
 

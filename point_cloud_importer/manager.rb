@@ -45,6 +45,7 @@ module PointCloudImporter
     def add_cloud(cloud)
       with_clouds_lock do
         @clouds << cloud
+        cloud.manager = self if cloud.respond_to?(:manager=)
         self.active_cloud = cloud
         ensure_overlay!
       end
@@ -63,6 +64,8 @@ module PointCloudImporter
 
         self.active_cloud = @clouds.last
       end
+
+      removed_cloud.manager = nil if removed_cloud.respond_to?(:manager=)
 
       removed_cloud.dispose!
       warn_unless_disposed(removed_cloud)
@@ -90,6 +93,7 @@ module PointCloudImporter
       end
 
       clouds_to_dispose.each do |cloud|
+        cloud.manager = nil if cloud.respond_to?(:manager=)
         cloud.dispose!
         warn_unless_disposed(cloud)
       end
