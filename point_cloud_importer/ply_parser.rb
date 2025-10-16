@@ -387,11 +387,10 @@ module PointCloudImporter
       point = [x, y, z]
       color = if color_indices
                 r_index, g_index, b_index = color_indices
-                [
-                  values[base + r_index].to_i,
-                  values[base + g_index].to_i,
-                  values[base + b_index].to_i
-                ]
+                r = values[base + r_index].to_i
+                g = values[base + g_index].to_i
+                b = values[base + b_index].to_i
+                ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff)
               end
       intensity = intensity_index ? values[base + intensity_index].to_f : nil
       [point, color, intensity]
