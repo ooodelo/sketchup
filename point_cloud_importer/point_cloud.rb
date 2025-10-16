@@ -55,9 +55,7 @@ module PointCloudImporter
 
     BACKGROUND_TIMER_INTERVAL = 0.015
     BACKGROUND_STEP_BUDGET = 0.02
-    BACKGROUND_INVALIDATE_INTERVAL = 0.2
     BACKGROUND_SAMPLE_MIN_SIZE = 50_000
-    BACKGROUND_SAMPLE_MAX_SIZE = 100_000
     BACKGROUND_MAX_ITERATIONS = 10_000
     BACKGROUND_MAX_DURATION = 120.0
 
@@ -118,14 +116,23 @@ module PointCloudImporter
       ].freeze
     }.freeze
 
-    def initialize(name:, points: nil, colors: nil, intensities: nil, metadata: {}, chunk_capacity: ChunkedArray::DEFAULT_CHUNK_CAPACITY)
+    def initialize(name:, points: nil, colors: nil, intensities: nil, metadata: {}, chunk_capacity: nil)
+      @settings = Settings.instance
+      setting_chunk_capacity = @settings[:chunk_capacity].to_i
+      setting_chunk_capacity = ChunkedArray::DEFAULT_CHUNK_CAPACITY if setting_chunk_capacity <= 0
+      provided_chunk_capacity = chunk_capacity && chunk_capacity.to_i
+      resolved_chunk_capacity = if provided_chunk_capacity && provided_chunk_capacity.positive?
+                                  provided_chunk_capacity
+                                else
+                                  setting_chunk_capacity
+                                end
+
       @name = name
-      @points = ChunkedArray.new(chunk_capacity)
-      @colors = colors ? ChunkedArray.new(chunk_capacity) : nil
-      @intensities = intensities ? ChunkedArray.new(chunk_capacity) : nil
+      @points = ChunkedArray.new(resolved_chunk_capacity)
+      @colors = colors ? ChunkedArray.new(resolved_chunk_capacity) : nil
+      @intensities = intensities ? ChunkedArray.new(resolved_chunk_capacity) : nil
       @metadata = (metadata || {}).dup
       @visible = true
-      @settings = Settings.instance
       @point_size = @settings[:point_size]
       @point_style = ensure_valid_style(@settings[:point_style])
       persist_style!(@point_style) if @point_style != @settings[:point_style]
@@ -1054,7 +1061,12 @@ module PointCloudImporter
       nil
     end
 
-    DRAW_BATCH_SIZE = 250_000
+    def batch_vertices_limit
+      limit = @settings[:batch_vertices_limit].to_i
+      return Settings::DEFAULTS[:batch_vertices_limit] if limit <= 0
+
+      limit
+    end
     MAX_INFERENCE_GUIDES = 50_000
     MIN_PICK_TOLERANCE = 1e-3
     MAX_PICK_SAMPLES = 4_096
@@ -1347,9 +1359,10 @@ module PointCloudImporter
 
       @user_max_display_points = target_limit
 
-      startup_cap = [target_limit, 250_000].min
+      startup_limit = resolved_startup_cap
+      startup_cap = [target_limit, startup_limit].min
       startup_cap = available_points if startup_cap <= 0 && available_points.positive?
-      startup_cap = 250_000 if startup_cap <= 0
+      startup_cap = startup_limit if startup_cap <= 0
 
       base_cache = build_base_cache(limit: startup_cap)
       @lod_caches[LOD_LEVELS.first] = base_cache if base_cache
@@ -1547,7 +1560,7 @@ module PointCloudImporter
       if total_points.positive?
         octree_sample_sizes = sampling_sizes_for_total(total_points,
                                                        min_size: BACKGROUND_SAMPLE_MIN_SIZE,
-                                                       max_size: BACKGROUND_SAMPLE_MAX_SIZE)
+                                                       max_size: max_background_sample_size)
         octree_sample_sizes.each_with_index do |sample_size, sample_index|
           steps << lambda { build_octree_sampled(generation, background_generation, sample_index, sample_size) }
         end
@@ -1558,7 +1571,7 @@ module PointCloudImporter
 
         spatial_sample_sizes = sampling_sizes_for_total(total_points,
                                                         min_size: BACKGROUND_SAMPLE_MIN_SIZE,
-                                                        max_size: BACKGROUND_SAMPLE_MAX_SIZE)
+                                                        max_size: max_background_sample_size)
         spatial_sample_sizes.each_with_index do |sample_size, sample_index|
           steps << lambda { build_spatial_index_sampled(generation, background_generation, sample_index, sample_size) }
         end
@@ -1717,7 +1730,7 @@ module PointCloudImporter
       effective_sample_size = sample_size_for_index(total_points,
                                                    sample_index,
                                                    min_size: BACKGROUND_SAMPLE_MIN_SIZE,
-                                                   max_size: BACKGROUND_SAMPLE_MAX_SIZE)
+                                                   max_size: max_background_sample_size)
 
       limit = sample_size || effective_sample_size
       sampled_points, = sample_cache_points(base_cache, limit)
@@ -1816,7 +1829,7 @@ module PointCloudImporter
       effective_sample_size = sample_size_for_index(total_points,
                                                    sample_index,
                                                    min_size: BACKGROUND_SAMPLE_MIN_SIZE,
-                                                   max_size: BACKGROUND_SAMPLE_MAX_SIZE)
+                                                   max_size: max_background_sample_size)
 
       limit = sample_size || effective_sample_size
       sampled_points, sampled_indices = sample_cache_points(base_cache, limit)
@@ -1924,10 +1937,28 @@ module PointCloudImporter
       sizes[sample_index.to_i] || total_points.to_i
     end
 
+    def resolved_startup_cap
+      value = @settings[:startup_cap].to_i
+      value = Settings::DEFAULTS[:startup_cap] if value <= 0
+      value
+    end
+
+    def background_invalidate_interval
+      interval_ms = @settings[:invalidate_interval_ms].to_i
+      interval_ms = Settings::DEFAULTS[:invalidate_interval_ms] if interval_ms <= 0
+      interval_ms.to_f / 1000.0
+    end
+
+    def max_background_sample_size
+      value = @settings[:max_points_sampled].to_i
+      value = Settings::DEFAULTS[:max_points_sampled] if value <= 0
+      value
+    end
+
     def throttled_view_invalidate
       now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       last = (@_last_invalidate_at ||= 0.0)
-      return if (now - last) < BACKGROUND_INVALIDATE_INTERVAL
+      return if (now - last) < background_invalidate_interval
 
       @_last_invalidate_at = now
       invalidate_active_view
@@ -2082,8 +2113,8 @@ module PointCloudImporter
       return nil unless points && !points.empty?
 
       Octree.new(points,
-                 max_points_per_node: Octree::DEFAULT_MAX_POINTS_PER_NODE,
-                 max_depth: Octree::DEFAULT_MAX_DEPTH)
+                 max_points_per_node: @settings[:octree_max_points_per_node],
+                 max_depth: @settings[:octree_max_depth])
     end
 
     def draw_cache(view, cache, weight, style)
@@ -2269,8 +2300,10 @@ module PointCloudImporter
       start_index = 0
       total_points = points.length
 
+      batch_size = [batch_vertices_limit, 1].max
+
       while start_index < total_points
-        end_index = [start_index + DRAW_BATCH_SIZE - 1, total_points - 1].min
+        end_index = [start_index + batch_size - 1, total_points - 1].min
         yield(start_index, end_index)
         start_index = end_index + 1
       end

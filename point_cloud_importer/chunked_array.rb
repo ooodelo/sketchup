@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'settings'
+
 module PointCloudImporter
   # Lightweight array-like container that stores data in fixed-size chunks to
   # avoid massive contiguous allocations while still providing familiar Array
@@ -7,7 +9,7 @@ module PointCloudImporter
   class ChunkedArray
     include Enumerable
 
-    DEFAULT_CHUNK_CAPACITY = 100_000
+    DEFAULT_CHUNK_CAPACITY = Settings::DEFAULTS[:chunk_capacity]
 
     attr_reader :chunk_capacity
 
