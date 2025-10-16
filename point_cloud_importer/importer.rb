@@ -78,7 +78,7 @@ module PointCloudImporter
 
           name = File.basename(job.path, '.*')
           settings = Settings.instance
-          chunk_size = job.options[:chunk_size] || settings[:import_chunk_size] || 1_000_000
+          chunk_size = job.options[:chunk_size] || settings[:import_chunk_size] || PlyParser::DEFAULT_CHUNK_SIZE
           chunk_size = chunk_size.to_i
           chunk_size = 1 if chunk_size < 1
           invalidate_every_n_chunks = job.options[:invalidate_every_n_chunks] || settings[:invalidate_every_n_chunks] || 1
