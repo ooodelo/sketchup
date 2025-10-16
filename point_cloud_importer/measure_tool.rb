@@ -115,6 +115,14 @@ module PointCloudImporter
 
       label = formatted_distance(@first_point, @second_point)
       @measurements << { start: @first_point, finish: @second_point, label: label }
+      history = @manager.measurement_history if @manager.respond_to?(:measurement_history)
+      history&.add(
+        from: @first_point,
+        to: @second_point,
+        distance: @first_point.distance(@second_point),
+        timestamp: Time.now,
+        label: label
+      )
       UI.messagebox("Расстояние: #{label}")
       reset!
       view.invalidate if view
