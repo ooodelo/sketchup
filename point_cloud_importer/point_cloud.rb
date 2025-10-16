@@ -6,13 +6,14 @@ require_relative 'settings'
 require_relative 'spatial_index'
 require_relative 'octree'
 require_relative 'chunked_array'
+require_relative 'inference_sampler'
 
 module PointCloudImporter
   # Data structure representing a point cloud and display preferences.
   class PointCloud
     attr_reader :name, :points, :colors, :bounding_box
     attr_accessor :visible
-    attr_reader :point_size, :point_style
+    attr_reader :point_size, :point_style, :inference_sample_indices, :inference_mode
 
     POINT_STYLE_CANDIDATES = {
       square: %i[DRAW_POINTS_SQUARES DRAW_POINTS_SQUARE DRAW_POINTS_OPEN_SQUARE],
@@ -62,6 +63,9 @@ module PointCloudImporter
       @lod_transition_start = nil
       @bounding_box = Geom::BoundingBox.new
       append_points!(points, colors) if points && !points.empty?
+
+      @inference_sample_indices = nil
+      @inference_mode = nil
       build_display_cache! if points && !points.empty?
 
       @finalizer_info = self.class.register_finalizer(self,
@@ -270,21 +274,58 @@ module PointCloudImporter
       end
     end
 
+    def build_static_inference_sample(target_count: nil, progress_callback: nil)
+      return unless points && points.length.positive?
+
+      target = target_count || Settings.instance[:static_inference_count]
+      target = InferenceSampler::DEFAULT_TARGET_COUNT if target.nil? || target <= 0
+
+      stage_mapping = {
+        grid: ['Построение spatial grid', 0.2],
+        curvature: ['Вычисление кривизны', 0.5],
+        selection: ['Выбор оптимальных точек', 0.8],
+        completed: ['Завершено', 1.0]
+      }
+
+      sampler_callback = if progress_callback
+                            lambda do |stage, progress|
+                              mapping = stage_mapping[stage]
+                              label = mapping ? mapping[0] : stage.to_s
+                              percent = progress
+                              percent = mapping[1] if percent.nil?
+                              progress_callback.call(label, percent)
+                            end
+                          end
+
+      sampler = InferenceSampler.new(points, target, progress_callback: sampler_callback)
+      indices = sampler.compute_sample
+      return [] if indices.empty?
+
+      @inference_sample_indices = indices
+      @inference_mode = :static
+      create_inference_guides(indices, mode: :static)
+
+      indices
+    end
+
     def ensure_inference_guides!(model)
       return unless model
       return if inference_enabled?
 
-      build_display_cache! unless @display_points
-      return if @display_points.empty?
+      guides = inference_guides_from_sample
+      if guides.empty?
+        build_display_cache! unless @display_points
+        return if @display_points.empty?
 
-      guides = sampled_guides
+        guides = sampled_guides
+      end
       return if guides.empty?
 
       model.start_operation('Point Cloud Guides', true)
       begin
         entities = model.entities
         group = entities.add_group
-        group.name = "#{name} – направляющие"
+        group.name = inference_group_name
         guides.each { |point| group.entities.add_cpoint(point) }
         group.hidden = !visible?
         @inference_group = group
@@ -329,6 +370,58 @@ module PointCloudImporter
 
       group = @inference_group
       group.hidden = !visible? if group&.valid?
+    end
+
+    def create_inference_guides(indices, model: nil, mode: nil)
+      return unless indices && !indices.empty?
+
+      model ||= Sketchup.active_model
+      return unless model
+
+      points_for_guides = indices.each_with_object([]) do |index, collection|
+        next unless index.is_a?(Integer) && index >= 0 && index < points.length
+
+        point = points[index]
+        collection << point if point
+      end
+      return if points_for_guides.empty?
+
+      remove_inference_guides!
+
+      model.start_operation('Point Cloud Guides', true)
+      begin
+        group = model.entities.add_group
+        group.name = inference_group_name(mode)
+        points_for_guides.each { |point| group.entities.add_cpoint(point) }
+        group.hidden = !visible?
+        @inference_group = group
+        @inference_mode = mode if mode
+        model.commit_operation
+      rescue StandardError
+        model.abort_operation
+        raise
+      end
+    end
+
+    def inference_group_name(mode = @inference_mode)
+      suffix = case mode
+               when :static then 'направляющие (Static)'
+               when :dynamic then 'направляющие (Dynamic)'
+               else 'направляющие'
+               end
+
+      "Облако #{name} - #{suffix}"
+    end
+
+    def inference_guides_from_sample
+      return [] unless @inference_sample_indices && !@inference_sample_indices.empty?
+
+      @inference_sample_indices.each_with_object([]) do |index, guides|
+        next unless index.is_a?(Integer)
+
+        point = points[index]
+        guides << point if point
+      end
     end
 
     def apply_point_updates!(changes)
