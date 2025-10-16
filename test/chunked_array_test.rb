@@ -31,5 +31,31 @@ module PointCloudImporter
       combined = array.chunks.flatten(1)
       assert_equal values, combined
     end
+
+    def test_append_direct_allocates_new_chunks
+      chunk_capacity = 3
+      array = ChunkedArray.new(chunk_capacity)
+
+      5.times { |index| array.append_direct!(index) }
+
+      assert_equal 5, array.length
+      assert_equal 2, array.chunks.length
+      assert_equal [0, 1, 2], array.chunks.first
+      assert_equal [3, 4, nil], array.chunks.last
+    end
+
+    def test_trim_last_chunk_removes_unused_tail
+      chunk_capacity = 4
+      array = ChunkedArray.new(chunk_capacity)
+
+      6.times { |index| array.append_direct!(index) }
+      array.trim_last_chunk!
+
+      assert_equal 6, array.length
+      assert_equal 2, array.chunks.length
+      assert_equal [0, 1, 2, 3], array.chunks.first
+      assert_equal [4, 5], array.chunks.last
+      assert_equal 2, array.chunks.last.length
+    end
   end
 end
