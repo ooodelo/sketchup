@@ -4,6 +4,7 @@ require 'singleton'
 require 'thread'
 
 require_relative 'point_cloud'
+require_relative 'logger'
 require_relative 'viewer_overlay'
 require_relative 'measure_tool'
 require_relative 'measurement_history'
@@ -47,6 +48,10 @@ module PointCloudImporter
         self.active_cloud = cloud
         ensure_overlay!
       end
+      Logger.debug do
+        point_count = cloud.points ? cloud.points.length : 0
+        "Облако #{cloud.name.inspect} добавлено в менеджер (#{point_count} точек)"
+      end
       view.invalidate if view
     end
 
@@ -63,6 +68,9 @@ module PointCloudImporter
       warn_unless_disposed(removed_cloud)
       view.invalidate if view
       refresh_ui_panel
+      Logger.debug do
+        "Облако #{removed_cloud&.name.inspect} удалено из менеджера"
+      end
     end
 
     def clear!
@@ -84,6 +92,11 @@ module PointCloudImporter
       clouds_to_dispose.each do |cloud|
         cloud.dispose!
         warn_unless_disposed(cloud)
+      end
+
+      Logger.debug do
+        disposed_names = clouds_to_dispose.map(&:name)
+        "Все облака удалены. Количество: #{clouds_to_dispose.length}. Список: #{disposed_names.inspect}"
       end
 
       if overlay_to_remove

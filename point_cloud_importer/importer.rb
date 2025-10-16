@@ -48,7 +48,11 @@ module PointCloudImporter
 
     def run_job(job)
       @last_result = nil
-      Logger.debug { "Запуск импорта файла #{job.path.inspect}" }
+      Logger.debug do
+        options_text = job.options.map { |key, value| "#{key}=#{value.inspect}" }.join(', ')
+        formatted_options = options_text.empty? ? 'без опций' : options_text
+        "Запуск импорта файла #{job.path.inspect} (#{formatted_options})"
+      end
       progress_dialog = UI::ImportProgressDialog.new(job) { job.cancel! }
       progress_dialog.show
       Logger.debug('Диалог прогресса отображен')
@@ -162,15 +166,24 @@ module PointCloudImporter
     end
 
     def finalize_job(job)
+      Logger.debug { "Финализация задания со статусом #{job.status.inspect}" }
       case job.status
       when :completed
         create_cloud(job)
       when :failed
         cleanup_partial_cloud(job)
+        Logger.debug do
+          error = job.error
+          next 'Сообщение об ошибке отсутствует' unless error
+
+          backtrace = Array(error.backtrace).first(5).join(' | ')
+          "Задание завершилось ошибкой: #{error.class}: #{error.message} (#{backtrace})"
+        end
         @last_result = nil
         ::UI.messagebox("Ошибка импорта: #{job.error.message}") if job.error
       when :cancelled
         cleanup_partial_cloud(job)
+        Logger.debug('Задание отменено пользователем при финализации')
         @last_result = nil
         ::UI.messagebox('Импорт отменен пользователем.')
       else
@@ -180,6 +193,10 @@ module PointCloudImporter
 
     def create_cloud(job)
       data = job.result
+      Logger.debug do
+        available_keys = data ? data.keys : []
+        "Создание облака из результата задания. Ключи: #{available_keys.inspect}"
+      end
       cloud = data[:cloud]
       metadata = data[:metadata]
       duration = data[:duration]
@@ -188,8 +205,13 @@ module PointCloudImporter
       raise ArgumentError, 'PLY файл не содержит точек' unless cloud && cloud.points && cloud.points.length.positive?
 
       cloud.update_metadata!(metadata)
+      Logger.debug do
+        point_count = cloud.points ? cloud.points.length : 0
+        "Облако обновлено метаданными. Точек: #{point_count}"
+      end
       apply_visual_options(cloud, job.options)
       cloud.prepare_render_cache!
+      Logger.debug('Готов кэш отрисовки облака точек')
 
       unless job.cloud_added?
         @manager.add_cloud(cloud)
@@ -210,6 +232,7 @@ module PointCloudImporter
     end
 
     def apply_visual_options(cloud, options)
+      Logger.debug("Применение визуальных опций: #{options.inspect}")
       cloud.density = options[:display_density] if options[:display_density]
       cloud.point_size = options[:point_size] if options[:point_size]
       cloud.point_style = options[:point_style] if options[:point_style]
@@ -308,6 +331,7 @@ module PointCloudImporter
     end
 
     def cleanup_partial_cloud(job)
+      Logger.debug('Начата очистка частично импортированного облака')
       cloud = job.cloud
       return unless cloud
 
@@ -320,6 +344,7 @@ module PointCloudImporter
       # Best effort cleanup; ignore errors to avoid masking original failure.
     ensure
       job.cloud = nil
+      Logger.debug('Очистка частичного облака завершена')
     end
 
   end
