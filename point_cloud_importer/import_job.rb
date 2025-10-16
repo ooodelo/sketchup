@@ -8,7 +8,7 @@ require_relative 'progress_estimator'
 module PointCloudImporter
   # Represents a background import job with shared state between threads.
   class ImportJob
-    MIN_PROGRESS_INTERVAL = 0.25
+    MIN_PROGRESS_INTERVAL = 0.5
 
     attr_reader :path, :options
     attr_accessor :thread
@@ -182,11 +182,20 @@ module PointCloudImporter
           clamped_fraction = clamp_fraction(fraction)
         end
 
-        throttled = !force && (now - @last_progress_time) < MIN_PROGRESS_INTERVAL
+        elapsed = now - @last_progress_time
+
+        throttled = !force && elapsed < MIN_PROGRESS_INTERVAL
         throttled &&= clamped_fraction && clamped_fraction < 1.0
         throttled &&= message.nil? || message == @message
 
         if throttled
+          Logger.debug do
+            format(
+              'Пропуск обновления прогресса: прошло %.3f с (порог %.3f с)',
+              elapsed,
+              MIN_PROGRESS_INTERVAL
+            )
+          end
           @processed_vertices = [processed_vertices.to_i, @processed_vertices].max if processed_vertices
           return
         end

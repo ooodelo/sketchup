@@ -17,9 +17,12 @@ module PointCloudImporter
 
     attr_reader :last_result
 
+    VIEW_INVALIDATE_INTERVAL = 0.2
+
     def initialize(manager)
       @manager = manager
       @last_result = nil
+      @last_view_invalidation_at = monotonic_time - VIEW_INVALIDATE_INTERVAL
     end
 
     def import_from_dialog
@@ -233,7 +236,7 @@ module PointCloudImporter
             cloud_context[:chunks_processed] += 1
             invalidate_every = cloud_context[:invalidate_every_n_chunks]
             if invalidate_every.positive? && (cloud_context[:chunks_processed] % invalidate_every).zero?
-              @manager.view&.invalidate
+              throttled_view_invalidate
             end
           when :finalize_cloud
             next if job.finished?
@@ -332,6 +335,30 @@ module PointCloudImporter
       end
     end
 
+    def throttled_view_invalidate
+      view = @manager&.view
+      return unless view && view.respond_to?(:invalidate)
+
+      now = monotonic_time
+      elapsed = now - @last_view_invalidation_at
+
+      if elapsed < VIEW_INVALIDATE_INTERVAL
+        Logger.debug do
+          format(
+            'Пропуск инвалидации вида: прошло %.3f с (порог %.3f с)',
+            elapsed,
+            VIEW_INVALIDATE_INTERVAL
+          )
+        end
+        return
+      end
+
+      view.invalidate
+      @last_view_invalidation_at = now
+    rescue StandardError => e
+      Logger.debug { "Не удалось выполнить инвалидацию вида: #{e.class}: #{e.message}" }
+    end
+
     def finalize_completed_job(job)
       data = job.result
       cloud = data[:cloud]
@@ -364,7 +391,7 @@ module PointCloudImporter
           start_time = background_metrics_enabled ? Time.now : nil
           begin
             cloud.prepare_render_cache!
-            @manager.view&.invalidate
+            throttled_view_invalidate
           rescue StandardError
             # Ignore background cache errors
           ensure
@@ -609,6 +636,16 @@ module PointCloudImporter
       collection_length(cache[:points])
     rescue StandardError
       nil
+    end
+
+    def monotonic_time
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    rescue NameError, Errno::EINVAL
+      Process.clock_gettime(:float_second)
+    rescue NameError, ArgumentError, Errno::EINVAL
+      Process.clock_gettime(Process::CLOCK_REALTIME)
+    rescue NameError, Errno::EINVAL
+      Time.now.to_f
     end
 
     def install_assign_metrics(cloud, metric_logger, memory_fetcher, cache_point_counter, enabled)
