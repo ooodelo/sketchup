@@ -19,7 +19,10 @@ module PointCloudImporter
       sampling_target: 500_000,
       dialog_width: 420,
       dialog_height: 520,
-      auto_apply_changes: true
+      auto_apply_changes: true,
+      color_mode: :original,
+      color_gradient: :viridis,
+      single_color: '#ffffff'
     }.freeze
 
     attr_reader :values
@@ -45,14 +48,14 @@ module PointCloudImporter
           key = key.to_sym
           next unless DEFAULTS.key?(key)
 
-          @values[key] = value
+          @values[key] = normalize_value(key, value)
         end
       end
 
       DEFAULTS.each_key do |key|
         next unless (value = Sketchup.read_default(preferences_namespace, key.to_s))
 
-        @values[key] = value
+        @values[key] = normalize_value(key, value)
       end
     end
 
@@ -73,6 +76,21 @@ module PointCloudImporter
 
     def preferences_namespace
       PREFERENCES_NAMESPACE
+    end
+
+    def normalize_value(key, value)
+      case key
+      when :point_style
+        value.to_sym
+      when :color_mode, :color_gradient
+        value.to_sym
+      when :single_color
+        value.to_s
+      else
+        value
+      end
+    rescue StandardError
+      DEFAULTS[key]
     end
   end
 end

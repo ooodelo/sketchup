@@ -75,6 +75,46 @@
       width: 120px;
     }
 
+    select {
+      background-color: #2c2c2c;
+      color: #f5f5f5;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+      padding: 4px;
+      font-size: 12px;
+    }
+
+    input[type="color"] {
+      background-color: #2c2c2c;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 4px;
+      width: 44px;
+      height: 24px;
+      padding: 0;
+    }
+
+    .color-cell {
+      min-width: 200px;
+    }
+
+    .color-controls {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .color-controls label {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 12px;
+      color: #dddddd;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
     .meta {
       font-size: 12px;
       color: #aaaaaa;
@@ -97,6 +137,7 @@
         <th>Точек</th>
         <th>Плотность</th>
         <th>Размер точки</th>
+        <th>Цвет</th>
         <th>Привязка</th>
         <th>Октодерево</th>
         <th>Действия</th>
@@ -135,7 +176,61 @@
       };
     }
 
-    let currentPayload = { clouds: [], auto_apply: true };
+    function findColorModeDefinition(modes, value) {
+      if (!Array.isArray(modes)) {
+        return null;
+      }
+      return modes.find(mode => mode.value === value) || null;
+    }
+
+    function renderColorModeOptions(modes, cloud) {
+      if (!Array.isArray(modes)) {
+        return '';
+      }
+      return modes.map(mode => {
+        const selected = mode.value === cloud.color_mode ? 'selected' : '';
+        const disableIntensity = mode.value === 'intensity' && !cloud.has_intensity;
+        const disabled = disableIntensity ? 'disabled' : '';
+        return `<option value="${mode.value}" ${selected} ${disabled}>${mode.label}</option>`;
+      }).join('');
+    }
+
+    function renderGradientOptions(gradients, selected) {
+      if (!Array.isArray(gradients)) {
+        return '';
+      }
+      return gradients.map(gradient => {
+        const selectedAttr = gradient.value === selected ? 'selected' : '';
+        return `<option value="${gradient.value}" ${selectedAttr}>${gradient.label}</option>`;
+      }).join('');
+    }
+
+    function updateColorControlVisibility(cell, modeValue) {
+      if (!cell) {
+        return;
+      }
+      const definition = findColorModeDefinition(currentPayload.color_modes || [], modeValue);
+      const showGradient = !!(definition && definition.requires_gradient);
+      const showSingle = !!(definition && definition.requires_single_color);
+      const gradientLabel = cell.querySelector('.color-gradient');
+      const gradientSelect = cell.querySelector('.color-gradient select');
+      const singleLabel = cell.querySelector('.color-single');
+      const singleInput = cell.querySelector('.color-single input');
+      if (gradientLabel) {
+        gradientLabel.classList.toggle('hidden', !showGradient);
+      }
+      if (gradientSelect) {
+        gradientSelect.disabled = !showGradient;
+      }
+      if (singleLabel) {
+        singleLabel.classList.toggle('hidden', !showSingle);
+      }
+      if (singleInput) {
+        singleInput.disabled = !showSingle;
+      }
+    }
+
+    let currentPayload = { clouds: [], auto_apply: true, color_modes: [], gradients: [] };
     let autoApplyEnabled = true;
 
     function setAutoApplyEnabled(enabled) {
@@ -186,6 +281,9 @@
           if (cloud.active) {
             row.classList.add('active');
           }
+          const modeDef = findColorModeDefinition(payload.color_modes || [], cloud.color_mode);
+          const showGradient = !!(modeDef && modeDef.requires_gradient);
+          const showSingleColor = !!(modeDef && modeDef.requires_single_color);
           row.innerHTML = `
             <td>
               <div>${cloud.name}</div>
@@ -198,6 +296,26 @@
             </td>
             <td>
               <input type="range" min="1" max="10" step="1" value="${cloud.point_size}" data-index="${index}" class="point-size" />
+            </td>
+            <td class="color-cell">
+              <div class="color-controls" data-mode="${cloud.color_mode}">
+                <label>
+                  Color mode
+                  <select class="color-mode" data-index="${index}">
+                    ${renderColorModeOptions(payload.color_modes, cloud)}
+                  </select>
+                </label>
+                <label class="color-gradient ${showGradient ? '' : 'hidden'}">
+                  Gradient
+                  <select class="color-gradient" data-index="${index}" ${showGradient ? '' : 'disabled'}>
+                    ${renderGradientOptions(payload.gradients, cloud.color_gradient)}
+                  </select>
+                </label>
+                <label class="color-single ${showSingleColor ? '' : 'hidden'}">
+                  Single color
+                  <input type="color" class="single-color" data-index="${index}" value="${cloud.single_color || '#ffffff'}" ${showSingleColor ? '' : 'disabled'} />
+                </label>
+              </div>
             </td>
             <td>
               <button class="inference" data-index="${index}">${cloud.inference ? 'Выключить' : 'Включить'}</button>
@@ -217,6 +335,7 @@
             </td>
           `;
           tbody.appendChild(row);
+          updateColorControlVisibility(row.querySelector('.color-cell'), cloud.color_mode);
         });
         wireEvents();
       }
@@ -340,6 +459,48 @@
           }
           window.sketchup && window.sketchup.pci_toggle_inference(index);
         });
+      });
+
+      document.querySelectorAll('select.color-mode').forEach(select => {
+        select.addEventListener('change', () => {
+          const index = Number.parseInt(select.dataset.index, 10);
+          if (!isValidIndex(index)) {
+            logInvalidIndex(select.dataset.index, 'color mode');
+            return;
+          }
+          updateColorControlVisibility(select.closest('.color-cell'), select.value);
+          window.sketchup && window.sketchup.pci_color_mode(index, select.value);
+        });
+      });
+
+      document.querySelectorAll('select.color-gradient').forEach(select => {
+        select.addEventListener('change', () => {
+          if (select.disabled) {
+            return;
+          }
+          const index = Number.parseInt(select.dataset.index, 10);
+          if (!isValidIndex(index)) {
+            logInvalidIndex(select.dataset.index, 'color gradient');
+            return;
+          }
+          window.sketchup && window.sketchup.pci_color_gradient(index, select.value);
+        });
+      });
+
+      document.querySelectorAll('input.single-color').forEach(input => {
+        const emitChange = () => {
+          if (input.disabled) {
+            return;
+          }
+          const index = Number.parseInt(input.dataset.index, 10);
+          if (!isValidIndex(index)) {
+            logInvalidIndex(input.dataset.index, 'single color');
+            return;
+          }
+          window.sketchup && window.sketchup.pci_single_color(index, input.value);
+        };
+        input.addEventListener('input', emitChange);
+        input.addEventListener('change', emitChange);
       });
     }
 

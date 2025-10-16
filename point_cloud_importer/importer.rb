@@ -67,7 +67,7 @@ module PointCloudImporter
           processed_points = 0
           total_vertices = 0
 
-          metadata = parser.parse(chunk_size: PlyParser::DEFAULT_CHUNK_SIZE) do |points_chunk, colors_chunk, processed|
+          metadata = parser.parse(chunk_size: PlyParser::DEFAULT_CHUNK_SIZE) do |points_chunk, colors_chunk, intensities_chunk, processed|
             next if job.cancel_requested?
 
             cloud ||= begin
@@ -77,7 +77,7 @@ module PointCloudImporter
               created
             end
 
-            cloud.append_points!(points_chunk, colors_chunk)
+            cloud.append_points!(points_chunk, colors_chunk, intensities_chunk)
             processed_points = processed
             total_vertices = parser.total_vertex_count.to_i
             total_vertices = processed_points if total_vertices.zero?
