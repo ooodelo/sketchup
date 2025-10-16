@@ -41,12 +41,13 @@ module PointCloudImporter
         add_toolbar
       end
 
-      def refresh_panel_if_visible
+      def refresh_panel
         return unless @panel
         return unless @panel.visible?
 
         @panel.refresh!
       end
+      alias_method :refresh_panel_if_visible, :refresh_panel
 
       private
 

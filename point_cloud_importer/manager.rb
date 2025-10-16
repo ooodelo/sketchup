@@ -247,7 +247,10 @@ module PointCloudImporter
     def refresh_ui_panel
       return unless defined?(PointCloudImporter::UI::Commands)
 
-      PointCloudImporter::UI::Commands.instance(self).refresh_panel_if_visible
+      commands = PointCloudImporter::UI::Commands.instance(self)
+      return unless commands.respond_to?(:refresh_panel)
+
+      commands.refresh_panel
     rescue StandardError => e
       warn("[PointCloudImporter] Не удалось обновить панель: #{e.message}")
     end
