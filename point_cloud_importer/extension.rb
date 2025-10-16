@@ -5,6 +5,7 @@ require 'sketchup.rb'
 require_relative 'settings'
 require_relative 'manager'
 require_relative 'ui/commands'
+require_relative 'ui/first_import_wizard'
 
 module PointCloudImporter
   module Extension
@@ -14,6 +15,7 @@ module PointCloudImporter
       PointCloudImporter::Settings.instance.load!
       manager = PointCloudImporter::Manager.instance
       PointCloudImporter::UI::Commands.instance(manager).register!
+      PointCloudImporter::UI::FirstImportWizard.show_if_needed(manager)
     end
 
     activate
