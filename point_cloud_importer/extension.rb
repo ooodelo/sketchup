@@ -17,7 +17,8 @@ module PointCloudImporter
       binary_buffer_size: 1_048_576,
       invalidate_every_n_chunks: 5,
       build_octree_async: true,
-      logging_enabled: true
+      logging_enabled: true,
+      metrics_enabled: false
     }.freeze
 
     def chunk_size
@@ -71,6 +72,15 @@ module PointCloudImporter
       @logging_enabled = boolean(value, DEFAULTS[:logging_enabled])
     end
 
+    def metrics_enabled?
+      @metrics_enabled = DEFAULTS[:metrics_enabled] if @metrics_enabled.nil?
+      !!@metrics_enabled
+    end
+
+    def metrics_enabled=(value)
+      @metrics_enabled = boolean(value, DEFAULTS[:metrics_enabled])
+    end
+
     def load_from_settings(settings = Settings.instance)
       self.chunk_size = settings[:import_chunk_size]
       self.invalidate_every_n_chunks = settings[:invalidate_every_n_chunks]
@@ -78,6 +88,7 @@ module PointCloudImporter
       self.binary_buffer_size = settings[:binary_buffer_size]
       self.build_octree_async = settings[:build_octree_async]
       self.logging_enabled = settings[:logging_enabled]
+      self.metrics_enabled = settings[:metrics_enabled]
       self
     end
 
@@ -95,6 +106,8 @@ module PointCloudImporter
         self.build_octree_async = value
       when :logging_enabled
         self.logging_enabled = value
+      when :metrics_enabled
+        self.metrics_enabled = value
       end
     end
 
