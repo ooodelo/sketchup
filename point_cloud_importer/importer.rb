@@ -504,7 +504,7 @@ module PointCloudImporter
         return
       end
 
-      timer_id = ::UI.start_timer(RENDER_CACHE_RETRY_INTERVAL, repeat: true) do
+      timer_id = ::UI.start_timer(RENDER_CACHE_RETRY_INTERVAL, true) do
         attempt.call
       end
     end
