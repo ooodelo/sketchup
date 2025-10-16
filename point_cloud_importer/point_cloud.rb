@@ -1349,6 +1349,9 @@ module PointCloudImporter
             @lod_caches = lod_caches
             assign_primary_cache(full_base_cache)
             ensure_octree_for_cache(full_base_cache)
+            LOD_LEVELS[1..-1].each do |level|
+              ensure_octree_for_cache(lod_caches[level])
+            end
             @spatial_index = spatial_index
           end
         rescue StandardError => error
