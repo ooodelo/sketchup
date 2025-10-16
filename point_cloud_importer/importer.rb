@@ -110,6 +110,8 @@ module PointCloudImporter
             @manager.view&.invalidate
           end
 
+          cloud.finalize_bounds!
+
           if job.cancel_requested?
             job.mark_cancelled!
             next
