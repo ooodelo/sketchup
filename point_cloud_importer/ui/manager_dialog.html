@@ -77,6 +77,7 @@
         <th>Плотность</th>
         <th>Размер точки</th>
         <th>Привязка</th>
+        <th>Октодерево</th>
         <th>Действия</th>
       </tr>
     </thead>
@@ -100,6 +101,22 @@
 
     function logInvalidIndex(index, source) {
       console.warn(`[PointCloudImporter] Ignored ${source} request with invalid index:`, index);
+    }
+
+    function formatStats(stats) {
+      if (!stats) {
+        return '';
+      }
+
+      const visited = Number.isFinite(stats.nodes_visited) ? stats.nodes_visited : 0;
+      const culled = Number.isFinite(stats.nodes_culled) ? stats.nodes_culled : 0;
+      const points = Number.isFinite(stats.points_returned) ? stats.points_returned : 0;
+
+      if (visited === 0 && culled === 0 && points === 0) {
+        return '';
+      }
+
+      return `Узлов: ${visited}, отсечено: ${culled}, точек: ${points}`;
     }
 
     window.pci = {
@@ -128,6 +145,13 @@
             <td>
               <button class="inference" data-index="${index}">${cloud.inference ? 'Выключить' : 'Включить'}</button>
               <div class="meta">${cloud.inference ? 'Созданы направляющие точки' : 'Нет направляющих'}</div>
+            </td>
+            <td>
+              <label>
+                <input type="checkbox" class="octree-debug" data-index="${index}" ${cloud.octree_debug ? 'checked' : ''} />
+                <span class="meta">Показать границы</span>
+              </label>
+              <div class="meta">${formatStats(cloud.octree_stats)}</div>
             </td>
             <td>
               <button class="toggle" data-index="${index}">${cloud.visible ? 'Скрыть' : 'Показать'}</button>
@@ -174,6 +198,18 @@
           if (confirm('Удалить облако?')) {
             window.sketchup && window.sketchup.pci_remove(index);
           }
+        });
+      });
+
+      document.querySelectorAll('input.octree-debug').forEach(input => {
+        input.addEventListener('change', () => {
+          const index = Number.parseInt(input.dataset.index, 10);
+          if (!isValidIndex(index)) {
+            logInvalidIndex(input.dataset.index, 'octree debug');
+            return;
+          }
+          const value = input.checked;
+          window.sketchup && window.sketchup.pci_toggle_octree_debug(index, value);
         });
       });
 

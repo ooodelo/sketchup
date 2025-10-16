@@ -78,6 +78,14 @@ module PointCloudImporter
           @manager.view&.invalidate
           refresh
         end
+        @dialog.add_action_callback('pci_toggle_octree_debug') do |_, cloud_index, value|
+          cloud = validate_cloud_index(cloud_index)
+          next unless cloud
+
+          cloud.octree_debug_enabled = value.to_s == 'true'
+          @manager.view&.invalidate
+          refresh
+        end
         @dialog.add_action_callback('pci_remove') do |_, cloud_index|
           cloud = validate_cloud_index(cloud_index)
           next unless cloud
@@ -101,7 +109,9 @@ module PointCloudImporter
               density: cloud.density,
               point_size: cloud.point_size,
               metadata: cloud.metadata,
-              inference: cloud.inference_enabled?
+              inference: cloud.inference_enabled?,
+              octree_debug: cloud.octree_debug_enabled?,
+              octree_stats: cloud.last_octree_query_stats
             }
           end
         }
