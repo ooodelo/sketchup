@@ -30,7 +30,8 @@ module PointCloudImporter
       color_gradient: :viridis,
       single_color: '#ffffff',
       build_octree_async: true,
-      logging_enabled: true
+      logging_enabled: true,
+      metrics_enabled: false
     }.freeze
 
     attr_reader :values
@@ -105,7 +106,7 @@ module PointCloudImporter
         value.to_i
       when :dialog_width, :dialog_height, :panel_width, :panel_height, :point_size, :max_display_points
         value.to_i
-      when :auto_apply_changes, :build_octree_async, :logging_enabled
+      when :auto_apply_changes, :build_octree_async, :logging_enabled, :metrics_enabled
         normalize_boolean(value)
       else
         value

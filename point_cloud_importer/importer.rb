@@ -48,6 +48,15 @@ module PointCloudImporter
 
     def run_job(job)
       @last_result = nil
+      metrics_enabled_flag = metrics_enabled?
+      metrics_state = {
+        append_duration: 0.0,
+        append_points: 0,
+        assign_hooked: false
+      }
+      metric_logger = method(:log_metric)
+      memory_fetcher = method(:capture_peak_memory_bytes)
+      cache_point_counter = method(:cache_point_count)
       Logger.debug do
         options_text = job.options.map { |key, value| "#{key}=#{value.inspect}" }.join(', ')
         formatted_options = options_text.empty? ? 'без опций' : options_text
@@ -107,12 +116,28 @@ module PointCloudImporter
           cloud = PointCloud.new(name: name, metadata: parser.metadata || {})
           job.cloud = cloud
 
+          if metrics_enabled_flag && !metrics_state[:assign_hooked]
+            metrics_state[:assign_hooked] = install_assign_metrics(
+              cloud,
+              metric_logger,
+              memory_fetcher,
+              cache_point_counter,
+              metrics_enabled_flag
+            )
+          end
+
           chunks_processed = 0
+          parsing_started_at = metrics_enabled_flag ? Time.now : nil
           metadata = parser.parse(chunk_size: chunk_size) do |points_chunk, colors_chunk, intensities_chunk, processed|
             next if job.cancel_requested?
             next unless points_chunk && !points_chunk.empty?
 
+            append_started_at = metrics_enabled_flag ? Time.now : nil
             cloud.append_points!(points_chunk, colors_chunk, intensities_chunk)
+            if metrics_enabled_flag && append_started_at
+              metrics_state[:append_duration] += Time.now - append_started_at
+              metrics_state[:append_points] += points_chunk.respond_to?(:length) ? points_chunk.length : 0
+            end
 
             chunks_processed += 1
 
@@ -127,6 +152,28 @@ module PointCloudImporter
             next unless (chunks_processed % invalidate_every_n_chunks).zero?
 
             @manager.view&.invalidate
+          end
+
+          if metrics_enabled_flag && parsing_started_at
+            parsing_total_duration = Time.now - parsing_started_at
+            parsing_duration = parsing_total_duration - metrics_state[:append_duration]
+            parsing_duration = 0.0 if parsing_duration.negative?
+            total_points = collection_length(cloud.points)
+            peak_memory_bytes = memory_fetcher.call
+            metric_logger.call(
+              'parsing',
+              parsing_duration,
+              points: total_points,
+              peak_memory_bytes: peak_memory_bytes,
+              enabled: metrics_enabled_flag
+            )
+            metric_logger.call(
+              'append_points!',
+              metrics_state[:append_duration],
+              points: metrics_state[:append_points],
+              peak_memory_bytes: peak_memory_bytes,
+              enabled: metrics_enabled_flag
+            )
           end
 
           cloud.finalize_bounds!
@@ -207,12 +254,29 @@ module PointCloudImporter
         job.mark_cloud_added!
       end
 
+      background_metrics_enabled = metrics_enabled?
+      background_metric_logger = method(:log_metric)
+      background_memory_fetcher = method(:capture_peak_memory_bytes)
+
       Thread.new do
+        start_time = background_metrics_enabled ? Time.now : nil
         begin
           cloud.prepare_render_cache!
           @manager.view&.invalidate
         rescue StandardError
           # Ignore background cache errors
+        ensure
+          if background_metrics_enabled && start_time
+            duration = Time.now - start_time
+            points_count = collection_length(cloud&.points)
+            background_metric_logger.call(
+              'background_index',
+              duration,
+              points: points_count,
+              peak_memory_bytes: background_memory_fetcher.call,
+              enabled: background_metrics_enabled
+            )
+          end
         end
       end
 
@@ -336,6 +400,137 @@ module PointCloudImporter
       else
         count.to_s
       end
+    end
+
+    def log_metric(stage, duration, points: nil, peak_memory_bytes: nil, enabled: nil)
+      enabled = metrics_enabled? if enabled.nil?
+      return unless enabled
+
+      message_parts = ["METRICS #{stage}"]
+      message_parts << "duration=#{duration ? format_duration(duration) : 'n/a'}"
+
+      unless points.nil?
+        points_value = points.to_i
+        message_parts << "points=#{format_point_count(points_value)}"
+        if duration && duration.positive?
+          rate = points_value.zero? ? 0.0 : points_value.to_f / duration
+          message_parts << "rate=#{format_rate(rate)} pts/s"
+        end
+      end
+
+      if peak_memory_bytes
+        message_parts << "peak_memory=#{format_memory(peak_memory_bytes)}"
+      end
+
+      Logger.debug(message_parts.join(', '))
+    end
+
+    def metrics_enabled?
+      return false unless defined?(PointCloudImporter::Config)
+
+      config = PointCloudImporter::Config
+      config.respond_to?(:metrics_enabled?) && config.metrics_enabled?
+    rescue StandardError
+      false
+    end
+
+    def format_duration(value)
+      strip_trailing_zero(format('%.3f', value.to_f)) + 's'
+    end
+
+    def format_rate(value)
+      return '0.00' unless value && value.finite?
+
+      rate = value.to_f
+      if rate >= 1_000_000
+        strip_trailing_zero(format('%.2fM', rate / 1_000_000.0))
+      elsif rate >= 1_000
+        strip_trailing_zero(format('%.2fK', rate / 1_000.0))
+      else
+        strip_trailing_zero(format('%.2f', rate))
+      end
+    end
+
+    def format_memory(bytes)
+      return 'n/a' unless bytes
+
+      value = bytes.to_f
+      if value >= 1024**3
+        strip_trailing_zero(format('%.2f', value / (1024.0**3))) + ' GB'
+      elsif value >= 1024**2
+        strip_trailing_zero(format('%.2f', value / (1024.0**2))) + ' MB'
+      elsif value >= 1024
+        strip_trailing_zero(format('%.2f', value / 1024.0)) + ' KB'
+      else
+        strip_trailing_zero(format('%.2f', value)) + ' B'
+      end
+    end
+
+    def strip_trailing_zero(value)
+      string = value.to_s
+      string = string.sub(/(\.\d*[1-9])0+\z/, '\1')
+      string.sub(/\.0+\z/, '')
+    end
+
+    def capture_peak_memory_bytes
+      status_path = '/proc/self/status'
+      return nil unless File.readable?(status_path)
+
+      line = File.foreach(status_path).find { |content| content.start_with?('VmHWM:') }
+      return nil unless line
+
+      match = line.match(/VmHWM:\s*(\d+)\s*kB/i)
+      return nil unless match
+
+      match[1].to_i * 1024
+    rescue StandardError
+      nil
+    end
+
+    def collection_length(collection)
+      return nil unless collection
+
+      collection.respond_to?(:length) ? collection.length : nil
+    rescue StandardError
+      nil
+    end
+
+    def cache_point_count(cache)
+      return nil unless cache.is_a?(Hash)
+
+      indices = cache[:point_indices]
+      return collection_length(indices) if indices
+
+      collection_length(cache[:points])
+    rescue StandardError
+      nil
+    end
+
+    def install_assign_metrics(cloud, metric_logger, memory_fetcher, cache_point_counter, enabled)
+      return false unless enabled
+
+      original_assign = cloud.method(:assign_primary_cache)
+      logged = false
+
+      cloud.define_singleton_method(:assign_primary_cache) do |cache|
+        start_time = Time.now
+        result = original_assign.call(cache)
+        unless logged
+          logged = true
+          metric_logger.call(
+            'assign_primary_cache',
+            Time.now - start_time,
+            points: cache_point_counter.call(cache),
+            peak_memory_bytes: memory_fetcher.call,
+            enabled: enabled
+          )
+        end
+        result
+      end
+
+      true
+    rescue NameError
+      false
     end
 
     def cleanup_partial_cloud(job)
