@@ -1,0 +1,66 @@
+# frozen_string_literal: true
+
+module PointCloudImporter
+  # Estimates completion using vertex counts and/or consumed bytes.
+  class ProgressEstimator
+    attr_reader :total_vertices, :total_bytes, :processed_vertices, :processed_bytes
+
+    def initialize(total_vertices: nil, total_bytes: nil)
+      reset(total_vertices: total_vertices, total_bytes: total_bytes)
+    end
+
+    def reset(total_vertices: nil, total_bytes: nil)
+      @total_vertices = normalize_total(total_vertices)
+      @total_bytes = normalize_total(total_bytes)
+      @processed_vertices = 0
+      @processed_bytes = 0
+    end
+
+    def update(processed_vertices: nil, consumed_bytes: nil)
+      if processed_vertices
+        @processed_vertices = [processed_vertices.to_i, @processed_vertices].max
+      end
+
+      return unless consumed_bytes
+
+      bytes = consumed_bytes.to_i
+      return if bytes <= 0
+
+      @processed_bytes += bytes
+    end
+
+    def fraction
+      vertex_fraction = vertex_fraction()
+      byte_fraction = byte_fraction()
+
+      if vertex_fraction
+        if @processed_vertices <= @total_vertices || byte_fraction.nil?
+          vertex_fraction
+        else
+          byte_fraction || vertex_fraction
+        end
+      else
+        byte_fraction || 0.0
+      end
+    end
+
+    private
+
+    def vertex_fraction
+      return unless @total_vertices.positive?
+
+      [@processed_vertices.to_f / @total_vertices, 1.0].min
+    end
+
+    def byte_fraction
+      return unless @total_bytes.positive?
+
+      [@processed_bytes.to_f / @total_bytes, 1.0].min
+    end
+
+    def normalize_total(value)
+      total = value.to_i
+      total.positive? ? total : 0
+    end
+  end
+end

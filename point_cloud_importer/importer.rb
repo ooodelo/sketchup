@@ -92,13 +92,13 @@ module PointCloudImporter
             cloud.append_points!(points_chunk, colors_chunk, intensities_chunk)
             processed_points = processed
             total_vertices = parser.total_vertex_count.to_i
-            total_vertices = processed_points if total_vertices.zero?
             Logger.debug do
               chunk_size = points_chunk.respond_to?(:length) ? points_chunk.length : 'unknown'
               "Обработан блок точек (#{chunk_size}), всего обработано #{processed_points}"
             end
 
-            progress_fraction = total_vertices.positive? ? (processed_points.to_f / total_vertices) : 0.0
+            progress_fraction = parser.estimated_progress.to_f
+            progress_fraction = [[progress_fraction, 0.0].max, 1.0].min
             job.update_progress(progress_fraction, format_progress_message(processed_points, total_vertices))
           end
           Logger.debug('Завершено чтение PLY файла')

@@ -2,6 +2,8 @@
 
 require 'stringio'
 
+require_relative 'progress_estimator'
+
 module PointCloudImporter
     # Parser for PLY point cloud files (ASCII, binary little endian or binary big endian).
   class PlyParser
@@ -53,7 +55,7 @@ module PointCloudImporter
     BLUE_PROPERTY_NAMES = %w[blue diffuse_blue b].freeze
     INTENSITY_PROPERTY_NAMES = %w[intensity intensity_0 reflectance greyscale].freeze
 
-    attr_reader :path, :total_vertex_count, :metadata
+    attr_reader :path, :total_vertex_count, :metadata, :estimated_progress, :progress_estimator
 
     def initialize(path, progress_callback: nil, cancelled_callback: nil)
       @path = path
@@ -62,6 +64,8 @@ module PointCloudImporter
       @total_vertex_count = 0
       @metadata = {}
       @last_report_time = monotonic_time - PROGRESS_REPORT_INTERVAL
+      @estimated_progress = 0.0
+      @progress_estimator = ProgressEstimator.new
     end
 
     def parse(chunk_size: DEFAULT_CHUNK_SIZE, &block)
@@ -93,6 +97,15 @@ module PointCloudImporter
         header = parse_header(io)
         @total_vertex_count = header[:vertex_count] ? header[:vertex_count].to_i : 0
         @metadata = header[:metadata] || {}
+
+        data_bytes_total = remaining_bytes(io)
+        @progress_estimator = ProgressEstimator.new(
+          total_vertices: @total_vertex_count,
+          total_bytes: data_bytes_total
+        )
+        @estimated_progress = 0.0
+        @last_data_position = io.pos
+        @last_report_time = monotonic_time - PROGRESS_REPORT_INTERVAL
 
         validate_header!(header)
 
@@ -190,9 +203,11 @@ module PointCloudImporter
 
       vertex_count.times do |index|
         check_cancelled!
-        report(index, vertex_count)
         Thread.pass if (index % THREAD_YIELD_INTERVAL).zero? && index.positive?
         line = io.gets
+        current_pos = io.pos
+        consumed_bytes = [current_pos - @last_data_position, 0].max
+        @last_data_position = current_pos
         break unless line
 
         values = line.split
@@ -201,6 +216,8 @@ module PointCloudImporter
         colors_chunk << color if colors_chunk
         intensities_chunk << intensity if intensities_chunk
         processed += 1
+
+        update_progress(processed_vertices: processed, consumed_bytes: consumed_bytes)
 
         next unless points_chunk.length >= chunk_size
 
@@ -211,6 +228,7 @@ module PointCloudImporter
       end
 
       emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
+      report_progress(force: true)
     end
 
     def parse_binary(io, header, chunk_size, &block)
@@ -238,9 +256,11 @@ module PointCloudImporter
 
       vertex_count.times do |index|
         check_cancelled!
-        report(index, vertex_count)
         Thread.pass if (index % THREAD_YIELD_INTERVAL).zero? && index.positive?
         data = io.read(stride)
+        current_pos = io.pos
+        consumed_bytes = [current_pos - @last_data_position, 0].max
+        @last_data_position = current_pos
         break unless data && data.length == stride
 
         vertex_buffer.replace(data)
@@ -251,6 +271,8 @@ module PointCloudImporter
         intensities_chunk << intensity if intensities_chunk
         processed += 1
 
+        update_progress(processed_vertices: processed, consumed_bytes: consumed_bytes)
+
         next unless points_chunk.length >= chunk_size
 
         emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
@@ -260,6 +282,7 @@ module PointCloudImporter
       end
 
       emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
+      report_progress(force: true)
     end
 
     def emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
@@ -358,20 +381,36 @@ module PointCloudImporter
       raise UnsupportedFormat, "Отсутствуют обязательные координаты: #{missing.join(', ')}"
     end
 
-    def report(current, total)
+    def update_progress(processed_vertices:, consumed_bytes: nil)
+      @progress_estimator.update(
+        processed_vertices: processed_vertices,
+        consumed_bytes: consumed_bytes
+      )
+      @estimated_progress = @progress_estimator.fraction
+      report_progress
+    end
+
+    def report_progress(force: false)
       check_cancelled!
       return unless @progress_callback
-      return if total <= 0
 
       now = monotonic_time
-      emit = (current == total - 1)
-      emit ||= (now - @last_report_time) >= PROGRESS_REPORT_INTERVAL
+      emit = force || ((now - @last_report_time) >= PROGRESS_REPORT_INTERVAL)
+      emit ||= @estimated_progress >= 1.0
       return unless emit
 
-      processed = [current + 1, total].min
-      fraction = total.positive? ? (processed.to_f / total) : 0.0
       @last_report_time = now
-      @progress_callback.call(fraction, nil)
+      @progress_callback.call(@estimated_progress, nil)
+    end
+
+    def remaining_bytes(io)
+      size = io.size
+      return 0 unless size
+
+      remaining = size - io.pos
+      remaining.positive? ? remaining : 0
+    rescue StandardError
+      0
     end
 
     def monotonic_time
