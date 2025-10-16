@@ -22,6 +22,13 @@ module PointCloudImporter
       yield_interval: 10_000,
       binary_buffer_size: 1_048_576,
       binary_vertex_batch_size: 4_096,
+      startup_cap: 250_000,
+      invalidate_interval_ms: 200,
+      batch_vertices_limit: 250_000,
+      chunk_capacity: 100_000,
+      max_points_sampled: 100_000,
+      octree_max_points_per_node: 100_000,
+      octree_max_depth: 8,
       dialog_width: 420,
       dialog_height: 520,
       panel_width: 340,
@@ -104,7 +111,8 @@ module PointCloudImporter
       when :single_color
         value.to_s
       when :import_chunk_size, :invalidate_every_n_chunks, :yield_interval, :binary_buffer_size,
-           :binary_vertex_batch_size
+           :binary_vertex_batch_size, :startup_cap, :invalidate_interval_ms, :batch_vertices_limit,
+           :chunk_capacity, :max_points_sampled, :octree_max_points_per_node, :octree_max_depth
         value.to_i
       when :dialog_width, :dialog_height, :panel_width, :panel_height, :point_size, :max_display_points
         value.to_i

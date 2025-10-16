@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'settings'
+
 module PointCloudImporter
   # Represents a single node in the spatial octree.
   class OctreeNode
@@ -45,16 +47,20 @@ module PointCloudImporter
 
   # Spatial partitioning structure used to accelerate point cloud rendering.
   class Octree
-    DEFAULT_MAX_POINTS_PER_NODE = 100_000
-    DEFAULT_MAX_DEPTH = 8
+    DEFAULT_MAX_POINTS_PER_NODE = Settings::DEFAULTS[:octree_max_points_per_node]
+    DEFAULT_MAX_DEPTH = Settings::DEFAULTS[:octree_max_depth]
 
     attr_reader :root, :points, :max_points_per_node, :max_depth
     attr_reader :metadata
 
-    def initialize(points, max_points_per_node: DEFAULT_MAX_POINTS_PER_NODE, max_depth: DEFAULT_MAX_DEPTH)
+    def initialize(points, max_points_per_node: nil, max_depth: nil)
+      settings = Settings.instance
+      resolved_max_points = max_points_per_node || settings[:octree_max_points_per_node] || DEFAULT_MAX_POINTS_PER_NODE
+      resolved_max_depth = max_depth || settings[:octree_max_depth] || DEFAULT_MAX_DEPTH
+
       @points = points
-      @max_points_per_node = [max_points_per_node.to_i, 1].max
-      @max_depth = [max_depth.to_i, 1].max
+      @max_points_per_node = [resolved_max_points.to_i, 1].max
+      @max_depth = [resolved_max_depth.to_i, 1].max
       @root = nil
       @metadata = {}
       @last_query_stats = nil
