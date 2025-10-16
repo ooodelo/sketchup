@@ -61,12 +61,19 @@ module PointCloudImporter
         Thread.current.abort_on_exception = false
         begin
           job.start!
-          job.update_progress(0.0, 'Чтение PLY...')
+          job.update_progress(processed_vertices: 0, message: 'Чтение PLY...')
           start_time = Time.now
           parser = PlyParser.new(
             job.path,
             progress_callback: job.progress_callback,
             cancelled_callback: -> { job.cancel_requested? }
+          )
+
+          job.update_progress(
+            processed_vertices: 0,
+            total_vertices: parser.total_vertex_count,
+            total_bytes: parser.progress_estimator.total_bytes,
+            message: 'Чтение PLY...'
           )
 
           name = File.basename(job.path, '.*')
@@ -92,13 +99,11 @@ module PointCloudImporter
 
             total_vertices = parser.total_vertex_count.to_i
             total_vertices = processed if total_vertices.zero? || total_vertices < processed
-            job.update_progress(processed_vertices: processed)
-            fraction = if total_vertices.positive?
-                         processed.to_f / total_vertices
-                       else
-                         0.0
-                       end
-            job.update_progress(fraction, format_progress_message(processed, total_vertices))
+            job.update_progress(
+              processed_vertices: processed,
+              total_vertices: total_vertices,
+              message: format_progress_message(processed, total_vertices)
+            )
 
             next unless (chunks_processed % invalidate_every_n_chunks).zero?
 

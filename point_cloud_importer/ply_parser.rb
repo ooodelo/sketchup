@@ -108,6 +108,8 @@ module PointCloudImporter
         @last_data_position = io.pos
         @last_report_time = monotonic_time - PROGRESS_REPORT_INTERVAL
 
+        report_progress(force: true)
+
         validate_header!(header)
 
         case header[:format]
@@ -390,10 +392,10 @@ module PointCloudImporter
         consumed_bytes: consumed_bytes
       )
       @estimated_progress = @progress_estimator.fraction
-      report_progress
+      report_progress(consumed_bytes: consumed_bytes)
     end
 
-    def report_progress(force: false)
+    def report_progress(force: false, consumed_bytes: nil)
       check_cancelled!
       return unless @progress_callback
 
@@ -403,7 +405,13 @@ module PointCloudImporter
       return unless emit
 
       @last_report_time = now
-      @progress_callback.call(@estimated_progress, nil)
+      @progress_callback.call(
+        processed_vertices: @progress_estimator.processed_vertices,
+        consumed_bytes: consumed_bytes,
+        total_vertices: @total_vertex_count,
+        total_bytes: @progress_estimator.total_bytes,
+        fraction: @estimated_progress
+      )
     end
 
     def remaining_bytes(io)
