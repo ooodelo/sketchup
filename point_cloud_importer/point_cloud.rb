@@ -2432,7 +2432,10 @@ module PointCloudImporter
 
         return requested_limit if base_size <= 0
 
-        return [requested_limit, base_size].min
+        ramp_limit = @max_display_points.to_i
+        ramp_limit = requested_limit if ramp_limit <= 0
+
+        return [requested_limit, base_size, ramp_limit].min
       end
 
       limit = @max_display_points.to_i
