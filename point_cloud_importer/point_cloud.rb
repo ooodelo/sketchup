@@ -11,7 +11,7 @@ require_relative 'inference_sampler'
 module PointCloudImporter
   # Data structure representing a point cloud and display preferences.
   class PointCloud
-    attr_reader :name, :points, :colors, :intensities, :bounding_box
+    attr_reader :name, :points, :colors, :intensities
     attr_accessor :visible
     attr_reader :point_size, :point_style, :inference_sample_indices, :inference_mode
     attr_reader :color_mode, :color_gradient
@@ -123,6 +123,7 @@ module PointCloudImporter
       @intensity_max = nil
       @random_seed = deterministic_seed_for(name)
       @bounding_box = Geom::BoundingBox.new
+      @bounding_box_dirty = false
       @bounds_min_x = nil
       @bounds_min_y = nil
       @bounds_min_z = nil
@@ -152,6 +153,7 @@ module PointCloudImporter
       @intensity_min = nil
       @intensity_max = nil
       @bounding_box = nil
+      @bounding_box_dirty = nil
       @bounds_min_x = nil
       @bounds_min_y = nil
       @bounds_min_z = nil
@@ -180,6 +182,16 @@ module PointCloudImporter
 
     def visible?
       @visible
+    end
+
+    def bounding_box
+      rebuild_bounding_box_from_bounds_if_needed!
+      @bounding_box
+    end
+
+    def finalize_bounds!
+      rebuild_bounding_box_from_bounds_if_needed!
+      self
     end
 
     def point_size=(size)
@@ -714,6 +726,7 @@ module PointCloudImporter
       end
 
       compute_bounds_efficient!(points_array)
+      finalize_bounds!
       invalidate_display_cache!
       self
     end
@@ -749,6 +762,12 @@ module PointCloudImporter
       invalidate_display_cache!
     end
 
+    def rebuild_bounding_box_from_bounds_if_needed!
+      return unless @bounding_box_dirty || @bounding_box.nil?
+
+      rebuild_bounding_box_from_bounds!
+    end
+
     def reset_bounds_state!
       @bounds_min_x = nil
       @bounds_min_y = nil
@@ -757,12 +776,14 @@ module PointCloudImporter
       @bounds_max_y = nil
       @bounds_max_z = nil
       @bounding_box = Geom::BoundingBox.new
+      @bounding_box_dirty = false
     end
 
     def rebuild_bounding_box_from_bounds!
       if [@bounds_min_x, @bounds_min_y, @bounds_min_z,
           @bounds_max_x, @bounds_max_y, @bounds_max_z].any?(&:nil?)
         @bounding_box = Geom::BoundingBox.new
+        @bounding_box_dirty = false
         return
       end
 
@@ -770,6 +791,7 @@ module PointCloudImporter
       bbox.add(Geom::Point3d.new(@bounds_min_x, @bounds_min_y, @bounds_min_z))
       bbox.add(Geom::Point3d.new(@bounds_max_x, @bounds_max_y, @bounds_max_z))
       @bounding_box = bbox
+      @bounding_box_dirty = false
     end
 
     def update_bounds_with_chunk(points_chunk)
@@ -813,7 +835,7 @@ module PointCloudImporter
         @bounds_max_z = [@bounds_max_z, chunk_max_z].max
       end
 
-      rebuild_bounding_box_from_bounds!
+      @bounding_box_dirty = true
     end
 
     AXIS_INDICES = { x: 0, y: 1, z: 2 }.freeze
@@ -1100,13 +1122,14 @@ module PointCloudImporter
     end
 
     def normalize_height(point)
-      return 0.5 unless @bounding_box
+      bbox = bounding_box
+      return 0.5 unless bbox
 
       z = point_coordinate(point, :z)
       return 0.5 if z.nil?
 
-      min_z = @bounding_box.min.z
-      max_z = @bounding_box.max.z
+      min_z = bbox.min.z
+      max_z = bbox.max.z
       range = max_z - min_z
       return 0.5 if range.abs < Float::EPSILON
 
@@ -1116,13 +1139,14 @@ module PointCloudImporter
     end
 
     def rgb_from_xyz(point)
-      return Sketchup::Color.new(255, 255, 255) unless @bounding_box
+      bbox = bounding_box
+      return Sketchup::Color.new(255, 255, 255) unless bbox
 
       coords = point_coordinates(point)
       return Sketchup::Color.new(255, 255, 255) unless coords
 
-      min = @bounding_box.min
-      max = @bounding_box.max
+      min = bbox.min
+      max = bbox.max
 
       x = normalize_component(coords[0], min.x, max.x)
       y = normalize_component(coords[1], min.y, max.y)
@@ -1159,6 +1183,7 @@ module PointCloudImporter
     end
 
     def build_display_cache!
+      finalize_bounds!
       @display_cache_dirty = false
       @spatial_index = nil
       clear_octree!
@@ -1336,7 +1361,8 @@ module PointCloudImporter
       eye = camera.eye
       return unless eye
 
-      center = @bounding_box&.center
+      bbox = bounding_box
+      center = bbox&.center
       return unless center
 
       radius = bounding_radius
@@ -1396,9 +1422,10 @@ module PointCloudImporter
     end
 
     def bounding_radius
-      return 0.0 unless @bounding_box
+      bbox = bounding_box
+      return 0.0 unless bbox
 
-      diagonal = @bounding_box.diagonal
+      diagonal = bbox.diagonal
       return 0.0 unless diagonal
 
       diagonal.to_f * 0.5
@@ -1688,17 +1715,16 @@ module PointCloudImporter
       @bounds_max_y = max_y
       @bounds_max_z = max_z
 
-      rebuild_bounding_box_from_bounds!
+      @bounding_box_dirty = true
     end
 
     def compute_bounds!
       compute_bounds_efficient!(points)
+      finalize_bounds!
     end
 
     def ensure_bounding_box_initialized!
-      return if @bounding_box
-
-      rebuild_bounding_box_from_bounds!
+      rebuild_bounding_box_from_bounds_if_needed!
       @bounding_box ||= Geom::BoundingBox.new
     end
 
@@ -1715,9 +1741,13 @@ module PointCloudImporter
     def compute_world_tolerance(view, pixel_tolerance)
       return pixel_tolerance.to_f if view.nil?
 
-      candidate = view.pixels_to_model(pixel_tolerance.to_f, @bounding_box.center)
+      bbox = bounding_box
+      center = bbox&.center
+      return pixel_tolerance.to_f unless center
+
+      candidate = view.pixels_to_model(pixel_tolerance.to_f, center)
       if candidate.nil? || candidate <= 0.0
-        diagonal = @bounding_box.diagonal.to_f
+        diagonal = bbox.diagonal.to_f
         viewport = view.respond_to?(:vpwidth) ? view.vpwidth.to_f : 0.0
         if diagonal.positive? && viewport.positive?
           (diagonal / viewport) * pixel_tolerance.to_f
@@ -1732,8 +1762,11 @@ module PointCloudImporter
     end
 
     def expanded_bounds(distance)
-      min_point = @bounding_box.min
-      max_point = @bounding_box.max
+      bbox = bounding_box
+      return [Geom::Point3d.new(0, 0, 0), Geom::Point3d.new(0, 0, 0)] unless bbox
+
+      min_point = bbox.min
+      max_point = bbox.max
       expanded_min = Geom::Point3d.new(min_point.x - distance, min_point.y - distance, min_point.z - distance)
       expanded_max = Geom::Point3d.new(max_point.x + distance, max_point.y + distance, max_point.z + distance)
       [expanded_min, expanded_max]
