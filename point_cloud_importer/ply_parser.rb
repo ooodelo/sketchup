@@ -12,8 +12,8 @@ module PointCloudImporter
 
     DEFAULT_CHUNK_SIZE = 100_000
     PROGRESS_REPORT_INTERVAL = 0.5
-    THREAD_YIELD_INTERVAL = 10_000
-    BINARY_READ_BUFFER_SIZE = 1_048_576
+    THREAD_YIELD_INTERVAL = 500_000
+    BINARY_READ_BUFFER_SIZE = 8 * 1024 * 1024
 
 
     TYPE_MAP = {
@@ -304,10 +304,10 @@ module PointCloudImporter
       y = values[property_index_by_name['y']].to_f
       z = values[property_index_by_name['z']].to_f
 
-      point = Geom::Point3d.new(x, y, z)
+      point = [x, y, z]
       color = if color_indices
                 r_index, g_index, b_index = color_indices
-                Sketchup::Color.new(values[r_index].to_i, values[g_index].to_i, values[b_index].to_i)
+                [values[r_index].to_i, values[g_index].to_i, values[b_index].to_i]
               end
       intensity = intensity_index ? values[intensity_index].to_f : nil
       [point, color, intensity]
