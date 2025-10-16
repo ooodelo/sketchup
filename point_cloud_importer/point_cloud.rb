@@ -63,6 +63,7 @@ module PointCloudImporter
     DEFAULT_DISPLAY_POINT_CAP = 1_200_000
 
     DEFAULT_SINGLE_COLOR_HEX = '#ffffff'
+    PACKED_COLOR_MASK = 0x00ffffff
 
     COLOR_MODE_DEFINITIONS = [
       { key: :original, label: 'Original (PLY)', gradient: false, single_color: false },
@@ -717,7 +718,7 @@ module PointCloudImporter
         end
 
         if colors && !new_color.nil?
-          colors[index] = fetch_color_components(new_color) || new_color
+          colors[index] = pack_color_value(new_color)
         end
         if @intensities && !new_intensity.nil?
           @intensities[index] = new_intensity
@@ -759,9 +760,10 @@ module PointCloudImporter
       @points.append_chunk(points_array)
 
       if colors_array
+        normalized_colors = Array(colors_array).map { |color| pack_color_value(color) }
         @colors ||= ChunkedArray.new(@points.chunk_capacity)
         @colors.clear
-        @colors.append_chunk(colors_array)
+        @colors.append_chunk(normalized_colors)
       else
         @colors = nil
       end
@@ -791,7 +793,9 @@ module PointCloudImporter
       points_chunk.each { |point| @points.append_direct!(point) }
       if colors_chunk && !colors_chunk.empty?
         @colors ||= ChunkedArray.new(@points.chunk_capacity)
-        colors_chunk.each { |color| @colors.append_direct!(color) }
+        colors_chunk.each do |color|
+          @colors.append_direct!(pack_color_value(color))
+        end
       end
       if intensities_chunk && !intensities_chunk.empty?
         @intensities ||= ChunkedArray.new(@points.chunk_capacity)
@@ -945,6 +949,13 @@ module PointCloudImporter
 
       if stored.respond_to?(:red) && stored.respond_to?(:green) && stored.respond_to?(:blue)
         [stored.red.to_i, stored.green.to_i, stored.blue.to_i]
+      elsif stored.is_a?(Integer)
+        value = stored & PACKED_COLOR_MASK
+        [
+          (value >> 16) & 0xff,
+          (value >> 8) & 0xff,
+          value & 0xff
+        ]
       elsif stored.is_a?(Array)
         r = stored[0]
         g = stored[1]
@@ -964,6 +975,35 @@ module PointCloudImporter
       return nil unless components
 
       Sketchup::Color.new(components[0], components[1], components[2])
+    rescue StandardError
+      nil
+    end
+
+    def pack_color_components(components)
+      return nil unless components
+
+      r = components[0]
+      g = components[1]
+      b = components[2]
+      return nil if r.nil? || g.nil? || b.nil?
+
+      r_value = r.to_i & 0xff
+      g_value = g.to_i & 0xff
+      b_value = b.to_i & 0xff
+      (r_value << 16) | (g_value << 8) | b_value
+    rescue StandardError
+      nil
+    end
+
+    def pack_color_value(value)
+      return nil if value.nil?
+
+      if value.is_a?(Integer)
+        value & PACKED_COLOR_MASK
+      else
+        components = fetch_color_components(value)
+        components ? pack_color_components(components) : nil
+      end
     rescue StandardError
       nil
     end

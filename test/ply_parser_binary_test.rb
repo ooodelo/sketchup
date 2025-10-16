@@ -20,6 +20,12 @@ module PointCloudImporter
       end
     end
 
+    private
+
+    def pack_color(r, g, b)
+      ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff)
+    end
+
     def test_binary_parser_respects_buffer_and_chunk_size
       vertex_count = 75_000
       vertices = Array.new(vertex_count) do |index|
@@ -101,7 +107,8 @@ module PointCloudImporter
       refute_nil colors
       assert_nil intensities
       assert_equal [0.0, 1.0, 2.0], points.first
-      assert_equal [0, 1, 2], colors.first
+      assert_kind_of Integer, colors.first
+      assert_equal pack_color(0, 1, 2), colors.first
       assert_equal [vertex_count - 1, vertex_count, vertex_count + 1], points.last
     end
 
@@ -247,7 +254,8 @@ module PointCloudImporter
       assert_equal vertex_count, colors.length
       assert_equal vertex_count, intensities.length
       assert_equal [0.0, 1.0, 2.0], points.first
-      assert_equal [10, 20, 30], colors.first
+      assert_kind_of Integer, colors.first
+      assert_equal pack_color(10, 20, 30), colors.first
       assert_in_delta 0.0, intensities.first
       assert_equal [vertex_count - 1, vertex_count, vertex_count + 1], points.last
 
