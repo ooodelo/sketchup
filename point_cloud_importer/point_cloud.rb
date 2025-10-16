@@ -1415,7 +1415,7 @@ module PointCloudImporter
 
       if defined?(UI) && UI.respond_to?(:start_timer)
         timer_id = nil
-        timer_id = UI.start_timer(0, repeat: true) do
+        timer_id = UI.start_timer(BACKGROUND_TIMER_INTERVAL, repeat: true) do
           continue = process_background_steps
           next if continue
 
