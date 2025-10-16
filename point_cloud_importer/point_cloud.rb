@@ -720,16 +720,12 @@ module PointCloudImporter
 
       reset_bounds_state!
       @points.clear
-      points_array.each_slice(@points.chunk_capacity) do |slice|
-        @points.append_chunk(slice)
-      end
+      @points.append_chunk(points_array)
 
       if colors_array
         @colors ||= ChunkedArray.new(@points.chunk_capacity)
         @colors.clear
-        colors_array.each_slice(@colors.chunk_capacity) do |slice|
-          @colors.append_chunk(slice)
-        end
+        @colors.append_chunk(colors_array)
       else
         @colors = nil
       end
@@ -739,10 +735,8 @@ module PointCloudImporter
         @intensities.clear
         @intensity_min = nil
         @intensity_max = nil
-        intensities_array.each_slice(@intensities.chunk_capacity) do |slice|
-          @intensities.append_chunk(slice)
-          update_intensity_range!(slice)
-        end
+        @intensities.append_chunk(intensities_array)
+        update_intensity_range!(intensities_array)
       else
         @intensities = nil
         @intensity_min = nil
