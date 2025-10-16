@@ -65,6 +65,9 @@ module PointCloudImporter
     DEFAULT_SINGLE_COLOR_HEX = '#ffffff'
     PACKED_COLOR_MASK = 0x00ffffff
 
+    FRUSTUM_POSITION_QUANTUM = 0.1
+    FRUSTUM_FOV_QUANTUM = 0.25
+
     COLOR_MODE_DEFINITIONS = [
       { key: :original, label: 'Original (PLY)', gradient: false, single_color: false },
       { key: :height, label: 'By Height', gradient: true, single_color: false },
@@ -2297,10 +2300,27 @@ module PointCloudImporter
       target = camera.target
       fov = camera.respond_to?(:fov) ? camera.fov.to_f : 0.0
 
-      values = [eye.x, eye.y, eye.z, target.x, target.y, target.z, fov]
+      values = [
+        quantize_frustum_value(eye&.x, FRUSTUM_POSITION_QUANTUM),
+        quantize_frustum_value(eye&.y, FRUSTUM_POSITION_QUANTUM),
+        quantize_frustum_value(eye&.z, FRUSTUM_POSITION_QUANTUM),
+        quantize_frustum_value(target&.x, FRUSTUM_POSITION_QUANTUM),
+        quantize_frustum_value(target&.y, FRUSTUM_POSITION_QUANTUM),
+        quantize_frustum_value(target&.z, FRUSTUM_POSITION_QUANTUM),
+        quantize_frustum_value(fov, FRUSTUM_FOV_QUANTUM)
+      ]
+
       values.map { |value| format('%0.3f', value.to_f) }.join(':')
     rescue StandardError
       nil
+    end
+
+    def quantize_frustum_value(value, quantum)
+      return 0.0 if value.nil?
+      return 0.0 if quantum.nil? || quantum <= 0.0
+
+      scaled = value.to_f / quantum
+      (scaled.round * quantum)
     end
 
     def normalize_density(value)
