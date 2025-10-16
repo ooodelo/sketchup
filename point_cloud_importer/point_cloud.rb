@@ -36,8 +36,8 @@ module PointCloudImporter
     LOD_FADE_DURATION = 0.35
 
     BACKGROUND_TIMER_INTERVAL = 0.015
-    BACKGROUND_OCTREE_SAMPLE_LIMIT = 100_000
-    BACKGROUND_SPATIAL_SAMPLE_LIMIT = 120_000
+    BACKGROUND_SAMPLE_MIN_SIZE = 50_000
+    BACKGROUND_SAMPLE_MAX_SIZE = 100_000
 
     LARGE_POINT_COUNT_THRESHOLD = 3_000_000
     DEFAULT_DISPLAY_POINT_CAP = 1_200_000
@@ -113,6 +113,8 @@ module PointCloudImporter
       @display_index_lookup = nil
       @display_point_indices = nil
       @spatial_index = nil
+      @spatial_index_generation = nil
+      @spatial_index_metadata = nil
       @inference_group = nil
       @octree = nil
       @octree_mutex = Mutex.new
@@ -1375,8 +1377,46 @@ module PointCloudImporter
       LOD_LEVELS[1..-1].each do |level|
         @lod_background_tasks << { type: :lod_level, level: level }
       end
-      @lod_background_tasks << { type: :octree_sampled }
-      @lod_background_tasks << { type: :spatial_index_sampled }
+      base_points = base_cache[:points] || []
+      total_points = base_points.length
+
+      octree_sample_sizes = sampling_sizes_for_total(total_points,
+                                                     min_size: BACKGROUND_SAMPLE_MIN_SIZE,
+                                                     max_size: BACKGROUND_SAMPLE_MAX_SIZE)
+      octree_sample_sizes.each_with_index do |sample_size, sample_index|
+        @lod_background_tasks << {
+          type: :octree_sampled,
+          sample_index: sample_index,
+          sample_size: sample_size,
+          generation: generation
+        }
+      end
+
+      if total_points.positive? && (octree_sample_sizes.empty? || octree_sample_sizes.last < total_points)
+        @lod_background_tasks << {
+          type: :octree_full,
+          generation: generation
+        }
+      end
+
+      spatial_sample_sizes = sampling_sizes_for_total(total_points,
+                                                      min_size: BACKGROUND_SAMPLE_MIN_SIZE,
+                                                      max_size: BACKGROUND_SAMPLE_MAX_SIZE)
+      spatial_sample_sizes.each_with_index do |sample_size, sample_index|
+        @lod_background_tasks << {
+          type: :spatial_index_sampled,
+          sample_index: sample_index,
+          sample_size: sample_size,
+          generation: generation
+        }
+      end
+
+      if total_points.positive? && (spatial_sample_sizes.empty? || spatial_sample_sizes.last < total_points)
+        @lod_background_tasks << {
+          type: :spatial_index_full,
+          generation: generation
+        }
+      end
 
       queue_empty = @lod_background_tasks.empty? && !context[:needs_ramp]
 
@@ -1449,13 +1489,24 @@ module PointCloudImporter
     def perform_background_build_task(task, context)
       return unless task
 
+      task_generation = task[:generation]
+      current_generation = context ? context[:generation] : nil
+
+      if task_generation && current_generation && task_generation != current_generation
+        return
+      end
+
       case task[:type]
       when :lod_level
         build_lod_level(task[:level], context[:generation])
       when :octree_sampled
-        build_octree_sampled(context[:generation])
+        build_octree_sampled(context[:generation], task[:sample_index], task[:sample_size])
+      when :octree_full
+        build_octree_full(context[:generation])
       when :spatial_index_sampled
-        build_spatial_index_sampled(context[:generation])
+        build_spatial_index_sampled(context[:generation], task[:sample_index], task[:sample_size])
+      when :spatial_index_full
+        build_spatial_index_full(context[:generation])
       end
     end
 
@@ -1471,7 +1522,7 @@ module PointCloudImporter
       caches[level] ||= create_downsampled_cache(base_cache, level)
     end
 
-    def build_octree_sampled(generation)
+    def build_octree_sampled(generation, sample_index = 0, sample_size = nil)
       return unless generation == @lod_cache_generation
 
       caches = @lod_caches
@@ -1483,7 +1534,14 @@ module PointCloudImporter
       points = base_cache[:points]
       return unless points && !points.empty?
 
-      sampled_points, = sample_cache_points(base_cache, BACKGROUND_OCTREE_SAMPLE_LIMIT)
+      total_points = points.length
+      effective_sample_size = sample_size_for_index(total_points,
+                                                   sample_index,
+                                                   min_size: BACKGROUND_SAMPLE_MIN_SIZE,
+                                                   max_size: BACKGROUND_SAMPLE_MAX_SIZE)
+
+      limit = sample_size || effective_sample_size
+      sampled_points, = sample_cache_points(base_cache, limit)
       return if sampled_points.nil? || sampled_points.empty?
 
       built_octree = build_octree_for_points(sampled_points)
@@ -1492,6 +1550,8 @@ module PointCloudImporter
       metadata = {
         sampled: true,
         sample_size: sampled_points.length,
+        total_points: total_points,
+        sample_index: sample_index,
         max_display_points_snapshot: @max_display_points
       }
 
@@ -1510,7 +1570,7 @@ module PointCloudImporter
       end
     end
 
-    def build_spatial_index_sampled(generation)
+    def build_octree_full(generation)
       return unless generation == @lod_cache_generation
 
       caches = @lod_caches
@@ -1519,15 +1579,96 @@ module PointCloudImporter
       base_cache = caches[LOD_LEVELS.first]
       return unless base_cache
 
-      sampled_points, sampled_indices = sample_cache_points(base_cache, BACKGROUND_SPATIAL_SAMPLE_LIMIT)
+      points = base_cache[:points]
+      return unless points && !points.empty?
+
+      built_octree = build_octree_for_points(points)
+      return unless built_octree
+
+      metadata = {
+        sampled: false,
+        sample_size: points.length,
+        total_points: points.length,
+        max_display_points_snapshot: @max_display_points
+      }
+
+      mutex = (@octree_mutex ||= Mutex.new)
+      mutex.synchronize do
+        return unless generation == @lod_cache_generation
+
+        base_cache[:octree] = built_octree
+        base_cache[:octree_metadata] = metadata
+
+        current_cache = caches[LOD_LEVELS.first]
+        if base_cache.equal?(current_cache)
+          @octree = built_octree
+          @octree_metadata = metadata
+        end
+      end
+    end
+
+    def build_spatial_index_sampled(generation, sample_index = 0, sample_size = nil)
+      return unless generation == @lod_cache_generation
+
+      caches = @lod_caches
+      return unless caches
+
+      base_cache = caches[LOD_LEVELS.first]
+      return unless base_cache
+
+      points = base_cache[:points]
+      return unless points && !points.empty?
+
+      total_points = points.length
+      effective_sample_size = sample_size_for_index(total_points,
+                                                   sample_index,
+                                                   min_size: BACKGROUND_SAMPLE_MIN_SIZE,
+                                                   max_size: BACKGROUND_SAMPLE_MAX_SIZE)
+
+      limit = sample_size || effective_sample_size
+      sampled_points, sampled_indices = sample_cache_points(base_cache, limit)
       return if sampled_points.nil? || sampled_points.empty?
       return if sampled_indices.nil? || sampled_indices.empty?
 
       spatial_index = SpatialIndex.new(sampled_points, sampled_indices)
       return unless spatial_index
 
+      metadata = {
+        sampled: true,
+        sample_size: sampled_points.length,
+        total_points: total_points,
+        sample_index: sample_index
+      }
+
       if generation == @lod_cache_generation
         @spatial_index = spatial_index
+        @spatial_index_generation = generation
+        @spatial_index_metadata = metadata
+      end
+    end
+
+    def build_spatial_index_full(generation)
+      return unless generation == @lod_cache_generation
+
+      caches = @lod_caches
+      return unless caches
+
+      base_cache = caches[LOD_LEVELS.first]
+      return unless base_cache
+
+      spatial_index = build_spatial_index_for_cache(base_cache)
+      return unless spatial_index
+
+      metadata = {
+        sampled: false,
+        sample_size: base_cache[:points]&.length || 0,
+        total_points: base_cache[:points]&.length || 0
+      }
+
+      if generation == @lod_cache_generation
+        @spatial_index = spatial_index
+        @spatial_index_generation = generation
+        @spatial_index_metadata = metadata
       end
     end
 
@@ -1553,6 +1694,33 @@ module PointCloudImporter
       end
 
       [sampled_points, sampled_indices]
+    end
+
+    def sampling_sizes_for_total(total_points, min_size:, max_size:)
+      total_points = total_points.to_i
+      return [] if total_points <= 0
+
+      min_size = [min_size.to_i, 1].max
+      max_size = [max_size.to_i, min_size].max
+
+      sizes = []
+
+      first_size = [min_size, total_points].min
+      sizes << first_size if first_size.positive?
+
+      return sizes if total_points <= first_size
+
+      second_size = [max_size, total_points].min
+      sizes << second_size if second_size > first_size
+
+      sizes
+    end
+
+    def sample_size_for_index(total_points, sample_index, min_size:, max_size:)
+      sizes = sampling_sizes_for_total(total_points,
+                                       min_size: min_size,
+                                       max_size: max_size)
+      sizes[sample_index.to_i] || total_points.to_i
     end
 
     def maybe_start_max_display_point_ramp(context)
