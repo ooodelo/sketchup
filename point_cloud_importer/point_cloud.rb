@@ -1881,22 +1881,35 @@ module PointCloudImporter
         info
       end
 
-      def finalizer_proc(info)
-        proc do |_object_id|
-          begin
-            lingering = lingering_references(info)
-            disposed = info[:disposed]
-            name = info[:name]
+      module Finalizer
+        module_function
 
-            if !disposed
-              detail = lingering.empty? ? 'без остаточных ссылок' : "остатки: #{lingering.join(', ')}"
-              warn("[PointCloudImporter] PointCloud '#{name}' уничтожен GC без вызова dispose! (#{detail})")
-            elsif lingering.any?
-              warn("[PointCloudImporter] PointCloud '#{name}' уничтожен GC с оставшимися ссылками: #{lingering.join(', ')}")
-            end
-          rescue StandardError => e
-            warn("[PointCloudImporter] Ошибка финализатора для облака '#{info[:name]}': #{e.message}")
+        def safe_cleanup(_object_id, info)
+          return unless info.is_a?(Hash)
+          return unless defined?(PointCloudImporter::PointCloud)
+
+          point_cloud_class = PointCloudImporter::PointCloud
+          return unless point_cloud_class.respond_to?(:lingering_references, true)
+
+          name = info[:name]
+          disposed = info[:disposed]
+          lingering = point_cloud_class.lingering_references(info)
+
+          if !disposed
+            detail = lingering.empty? ? 'без остаточных ссылок' : "остатки: #{lingering.join(', ')}"
+            Kernel.warn("[PointCloudImporter] PointCloud '#{name}' уничтожен GC без вызова dispose! (#{detail})")
+          elsif lingering.any?
+            Kernel.warn("[PointCloudImporter] PointCloud '#{name}' уничтожен GC с оставшимися ссылками: #{lingering.join(', ')}")
           end
+        rescue StandardError => e
+          Kernel.warn("[PointCloudImporter] Ошибка финализатора для облака '#{name}': #{e.message}")
+          nil
+        end
+      end
+
+      def finalizer_proc(info)
+        proc do |object_id|
+          Finalizer.safe_cleanup(object_id, info)
         end
       end
 
