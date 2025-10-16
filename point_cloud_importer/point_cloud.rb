@@ -120,7 +120,7 @@ module PointCloudImporter
       @lod_previous_level = nil
       @lod_transition_start = nil
       @lod_background_build_pending = false
-      @lod_async_build_thread = nil
+      @lod_async_build_timer_id = nil
       @lod_cache_generation = 0
       @intensity_min = nil
       @intensity_max = nil
@@ -1319,9 +1319,7 @@ module PointCloudImporter
       base_index_lookup = base_cache[:index_lookup]
       base_point_indices = base_cache[:point_indices]
 
-      thread = Thread.new do
-        Thread.current.report_on_exception = false if Thread.current.respond_to?(:report_on_exception=)
-
+      build_operation = lambda do
         begin
           full_base_cache = create_cache(LOD_LEVELS.first,
                                          base_points,
@@ -1346,14 +1344,25 @@ module PointCloudImporter
           warn_background_build_failure(error)
         ensure
           if @lod_cache_generation == generation
-            @lod_async_build_thread = nil
+            @lod_async_build_timer_id = nil
             @lod_background_build_pending = false
           end
         end
       end
 
-      thread.report_on_exception = false if thread.respond_to?(:report_on_exception=)
-      @lod_async_build_thread = thread
+      if defined?(UI) && UI.respond_to?(:start_timer)
+        if @lod_async_build_timer_id && UI.respond_to?(:stop_timer)
+          UI.stop_timer(@lod_async_build_timer_id)
+        end
+
+        timer_id = UI.start_timer(0, false) do
+          build_operation.call
+        end
+
+        @lod_async_build_timer_id = timer_id
+      else
+        build_operation.call
+      end
     end
 
     def build_spatial_index_for_cache(cache)
@@ -1369,11 +1378,11 @@ module PointCloudImporter
     end
 
     def cancel_background_lod_build!
-      if @lod_async_build_thread&.alive?
-        @lod_async_build_thread.kill
+      if @lod_async_build_timer_id && defined?(UI) && UI.respond_to?(:stop_timer)
+        UI.stop_timer(@lod_async_build_timer_id)
       end
 
-      @lod_async_build_thread = nil
+      @lod_async_build_timer_id = nil
       @lod_background_build_pending = false
     end
 
