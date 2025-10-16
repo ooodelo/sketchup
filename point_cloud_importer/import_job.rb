@@ -2,6 +2,8 @@
 
 require 'thread'
 
+require_relative 'logger'
+
 module PointCloudImporter
   # Represents a background import job with shared state between threads.
   class ImportJob
@@ -23,6 +25,7 @@ module PointCloudImporter
       @cloud_added = false
       @mutex = Mutex.new
       @last_progress_time = monotonic_time - MIN_PROGRESS_INTERVAL
+      Logger.debug { "Создано задание импорта для #{path.inspect}" }
     end
 
     def start!
@@ -30,6 +33,7 @@ module PointCloudImporter
         @status = :running
         @last_progress_time = monotonic_time - MIN_PROGRESS_INTERVAL
       end
+      Logger.debug('Задание переведено в статус running')
     end
 
     def cancel!
@@ -40,6 +44,7 @@ module PointCloudImporter
         @status = :cancelling if @status == :running
         @message = 'Отмена...'
       end
+      Logger.debug('Получен запрос на отмену импорта')
     end
 
     def cancel_requested?
@@ -53,6 +58,7 @@ module PointCloudImporter
         @progress = 0.0 if @progress.nil?
         @message = 'Импорт отменен пользователем'
       end
+      Logger.debug('Задание помечено как отмененное')
     end
 
     def fail!(error)
@@ -61,6 +67,7 @@ module PointCloudImporter
         @error = error
         @message = error.message.to_s
       end
+      Logger.debug { "Задание завершилось ошибкой: #{error.class}: #{error.message}" }
     end
 
     def complete!(result)
@@ -70,6 +77,7 @@ module PointCloudImporter
         @progress = 1.0
         @message = 'Импорт завершен'
       end
+      Logger.debug('Задание успешно завершено')
     end
 
     def progress
@@ -141,6 +149,10 @@ module PointCloudImporter
         @progress = clamped_fraction unless clamped_fraction.nil?
         @message = text if text
         @last_progress_time = now
+      end
+      Logger.debug do
+        progress_text = clamped_fraction ? format('%.2f%%', clamped_fraction * 100) : 'n/a'
+        "Прогресс обновлен: #{progress_text} — #{text || @message}"
       end
     end
 
