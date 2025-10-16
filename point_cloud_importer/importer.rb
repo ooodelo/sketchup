@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'stringio'
+require 'thread'
 
 require_relative 'settings'
 require_relative 'point_cloud'
@@ -66,6 +67,8 @@ module PointCloudImporter
       progress_dialog = UI::ImportProgressDialog.new(job) { job.cancel! }
       progress_dialog.show
 
+      message_queue = SizedQueue.new(16)
+      worker_finished = false
       worker = Thread.new do
         Thread.current.abort_on_exception = false
         begin
@@ -113,106 +116,193 @@ module PointCloudImporter
                                          value
                                        end
 
-          cloud = PointCloud.new(name: name, metadata: parser.metadata || {})
-          job.cloud = cloud
-
-          if metrics_enabled_flag && !metrics_state[:assign_hooked]
-            metrics_state[:assign_hooked] = install_assign_metrics(
-              cloud,
-              metric_logger,
-              memory_fetcher,
-              cache_point_counter,
-              metrics_enabled_flag
-            )
-          end
+          message_queue << [
+            :create_cloud,
+            {
+              name: name,
+              metadata: parser.metadata || {},
+              invalidate_every_n_chunks: invalidate_every_n_chunks,
+              start_time: start_time
+            }
+          ]
 
           chunks_processed = 0
           parsing_started_at = metrics_enabled_flag ? Time.now : nil
           metadata = parser.parse(chunk_size: chunk_size) do |points_chunk, colors_chunk, intensities_chunk, processed|
-            next if job.cancel_requested?
+            break if job.cancel_requested? || job.finished?
             next unless points_chunk && !points_chunk.empty?
 
-            append_started_at = metrics_enabled_flag ? Time.now : nil
-            cloud.append_points!(points_chunk, colors_chunk, intensities_chunk)
-            if metrics_enabled_flag && append_started_at
-              metrics_state[:append_duration] += Time.now - append_started_at
-              metrics_state[:append_points] += points_chunk.respond_to?(:length) ? points_chunk.length : 0
-            end
+          message_queue << [
+            :append_chunk,
+            {
+              points: points_chunk,
+              colors: colors_chunk,
+              intensities: intensities_chunk
+            }
+          ]
 
-            chunks_processed += 1
+          chunks_processed += 1
 
-            total_vertices = parser.total_vertex_count.to_i
-            total_vertices = processed if total_vertices.zero? || total_vertices < processed
-            job.update_progress(
-              processed_vertices: processed,
-              total_vertices: total_vertices,
-              message: format_progress_message(processed, total_vertices)
-            )
-
-            next unless (chunks_processed % invalidate_every_n_chunks).zero?
-
-            @manager.view&.invalidate
+          total_vertices = parser.total_vertex_count.to_i
+          total_vertices = processed if total_vertices.zero? || total_vertices < processed
+          job.update_progress(
+            processed_vertices: processed,
+            total_vertices: total_vertices,
+            message: format_progress_message(processed, total_vertices)
+          )
           end
 
-          if metrics_enabled_flag && parsing_started_at
-            parsing_total_duration = Time.now - parsing_started_at
-            parsing_duration = parsing_total_duration - metrics_state[:append_duration]
-            parsing_duration = 0.0 if parsing_duration.negative?
-            total_points = collection_length(cloud.points)
-            peak_memory_bytes = memory_fetcher.call
-            metric_logger.call(
-              'parsing',
-              parsing_duration,
-              points: total_points,
-              peak_memory_bytes: peak_memory_bytes,
-              enabled: metrics_enabled_flag
-            )
-            metric_logger.call(
-              'append_points!',
-              metrics_state[:append_duration],
-              points: metrics_state[:append_points],
-              peak_memory_bytes: peak_memory_bytes,
-              enabled: metrics_enabled_flag
-            )
-          end
-
-          cloud.finalize_bounds!
+          parsing_finished_at = metrics_enabled_flag ? Time.now : nil
 
           if job.cancel_requested?
             job.mark_cancelled!
-            next
+          elsif job.finished?
+            # Job already finished by the main thread (likely due to an error)
+          else
+            message_queue << [
+              :finalize_cloud,
+              {
+                metadata: metadata || parser.metadata,
+                total_vertices: parser.total_vertex_count.to_i,
+                parsing_started_at: parsing_started_at,
+                parsing_finished_at: parsing_finished_at
+              }
+            ]
           end
-
-          metadata ||= parser.metadata
-          cloud.update_metadata!(metadata)
-
-          total_vertices = parser.total_vertex_count.to_i
-          total_vertices = cloud.points.length if total_vertices.zero?
-
-          job.complete!(
-            cloud: cloud,
-            metadata: metadata,
-            duration: Time.now - start_time,
-            total_vertices: total_vertices
-          )
         rescue PlyParser::Cancelled
           job.mark_cancelled!
         rescue PlyParser::UnsupportedFormat => e
           job.fail!(e)
         rescue StandardError => e
           job.fail!(e)
+        ensure
+          message_queue << [:worker_finished, nil]
         end
       end
 
       job.thread = worker
 
+      cloud_context = {
+        cloud: nil,
+        invalidate_every_n_chunks: 1,
+        chunks_processed: 0,
+        start_time: nil
+      }
+
+      process_messages = lambda do |limit = nil|
+        processed = 0
+        loop do
+          break if limit && processed >= limit
+
+          message, payload = message_queue.pop(true)
+          processed += 1
+          begin
+            case message
+          when :create_cloud
+            next if job.cancel_requested? || job.finished?
+
+            cloud = PointCloud.new(name: payload[:name], metadata: payload[:metadata] || {})
+            job.cloud = cloud
+
+            if metrics_enabled_flag && !metrics_state[:assign_hooked]
+              metrics_state[:assign_hooked] = install_assign_metrics(
+                cloud,
+                metric_logger,
+                memory_fetcher,
+                cache_point_counter,
+                metrics_enabled_flag
+              )
+            end
+
+            cloud_context[:cloud] = cloud
+            cloud_context[:invalidate_every_n_chunks] = [payload[:invalidate_every_n_chunks].to_i, 1].max
+            cloud_context[:start_time] = payload[:start_time]
+          when :append_chunk
+            next if job.cancel_requested? || job.finished?
+
+            cloud = cloud_context[:cloud]
+            next unless cloud
+
+            append_started_at = metrics_enabled_flag ? Time.now : nil
+            cloud.append_points!(payload[:points], payload[:colors], payload[:intensities])
+            if metrics_enabled_flag && append_started_at
+              metrics_state[:append_duration] += Time.now - append_started_at
+              metrics_state[:append_points] += collection_length(payload[:points]).to_i
+            end
+
+            cloud_context[:chunks_processed] += 1
+            invalidate_every = cloud_context[:invalidate_every_n_chunks]
+            if invalidate_every.positive? && (cloud_context[:chunks_processed] % invalidate_every).zero?
+              @manager.view&.invalidate
+            end
+          when :finalize_cloud
+            next if job.cancel_requested? || job.finished?
+
+            cloud = cloud_context[:cloud]
+            next unless cloud
+
+            cloud.finalize_bounds!
+
+            metadata = payload[:metadata] || {}
+            cloud.update_metadata!(metadata)
+
+            if metrics_enabled_flag && payload[:parsing_started_at]
+              parsing_finished_at = payload[:parsing_finished_at] || Time.now
+              parsing_total_duration = parsing_finished_at - payload[:parsing_started_at]
+              parsing_duration = parsing_total_duration - metrics_state[:append_duration]
+              parsing_duration = 0.0 if parsing_duration.negative?
+              total_points = collection_length(cloud.points)
+              peak_memory_bytes = memory_fetcher.call
+              metric_logger.call(
+                'parsing',
+                parsing_duration,
+                points: total_points,
+                peak_memory_bytes: peak_memory_bytes,
+                enabled: metrics_enabled_flag
+              )
+              metric_logger.call(
+                'append_points!',
+                metrics_state[:append_duration],
+                points: metrics_state[:append_points],
+                peak_memory_bytes: peak_memory_bytes,
+                enabled: metrics_enabled_flag
+              )
+            end
+
+            total_vertices = payload[:total_vertices].to_i
+            total_vertices = cloud.points.length if total_vertices.zero?
+            start_time = cloud_context[:start_time]
+            job.complete!(
+              cloud: cloud,
+              metadata: metadata,
+              duration: start_time ? Time.now - start_time : nil,
+              total_vertices: total_vertices
+            )
+          when :worker_finished
+            worker_finished = true
+          else
+            # Ignore unknown messages
+          end
+          rescue StandardError => e
+            unless job.finished?
+              job.fail!(e)
+            end
+          end
+        rescue ThreadError
+          break
+        end
+      end
+
       timer_id = nil
       timer_id = ::UI.start_timer(0.1, repeat: true) do
         progress_dialog.update
-        next unless job.finished?
+        process_messages.call(10)
+
+        next unless worker_finished && job.finished?
 
         ::UI.stop_timer(timer_id) if timer_id
         progress_dialog.close
+        process_messages.call while !message_queue.empty?
         job.thread&.join
         finalize_job(job)
       end
