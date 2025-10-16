@@ -119,6 +119,9 @@ module PointCloudImporter
       @lod_current_level = nil
       @lod_previous_level = nil
       @lod_transition_start = nil
+      @lod_background_build_pending = false
+      @lod_async_build_thread = nil
+      @lod_cache_generation = 0
       @intensity_min = nil
       @intensity_max = nil
       @random_seed = deterministic_seed_for(name)
@@ -164,6 +167,7 @@ module PointCloudImporter
     end
 
     def clear_cache!
+      cancel_background_lod_build!
       @display_cache_dirty = true
       @display_points = nil
       @display_colors = nil
@@ -1186,11 +1190,14 @@ module PointCloudImporter
       finalize_bounds!
       @display_cache_dirty = false
       @spatial_index = nil
+      cancel_background_lod_build!
       clear_octree!
       reset_frustum_cache!
       @last_octree_query_stats = nil
       @octree_metadata = nil
       @lod_caches = {}
+      @lod_cache_generation = (@lod_cache_generation || 0) + 1
+      current_generation = @lod_cache_generation
 
       return unless points && !points.empty?
 
@@ -1211,17 +1218,28 @@ module PointCloudImporter
         break if base_points.length >= @max_display_points
       end
 
-      base_cache = create_cache(LOD_LEVELS.first, base_points, base_colors, base_index_lookup, base_point_indices)
+      base_cache = create_cache(LOD_LEVELS.first,
+                                base_points,
+                                base_colors,
+                                base_index_lookup,
+                                base_point_indices,
+                                build_octree: !build_octree_async?)
       @lod_caches[LOD_LEVELS.first] = base_cache
-
-      LOD_LEVELS[1..-1].each do |level|
-        @lod_caches[level] = create_downsampled_cache(base_cache, level)
-      end
 
       assign_primary_cache(base_cache)
       @lod_current_level ||= LOD_LEVELS.first
       @lod_previous_level = nil
       @lod_transition_start = nil
+
+      if build_octree_async?
+        @lod_background_build_pending = true
+        start_background_lod_build(base_cache, current_generation)
+      else
+        LOD_LEVELS[1..-1].each do |level|
+          @lod_caches[level] = create_downsampled_cache(base_cache, level, build_octree: true)
+        end
+        @lod_background_build_pending = false
+      end
     end
 
     def ensure_display_caches!
@@ -1251,11 +1269,12 @@ module PointCloudImporter
       end
     end
 
-    def create_cache(level, points, colors, index_lookup, point_indices)
+    def create_cache(level, points, colors, index_lookup, point_indices, build_octree: true)
       cache_points = points ? points : []
       cache_colors = colors.nil? ? nil : colors
       cache_index_lookup = index_lookup ? index_lookup : {}
       cache_point_indices = point_indices ? point_indices : []
+      cache_octree = build_octree ? build_octree_for_points(cache_points) : nil
 
       {
         level: level,
@@ -1263,12 +1282,12 @@ module PointCloudImporter
         colors: cache_colors,
         index_lookup: cache_index_lookup,
         point_indices: cache_point_indices,
-        octree: build_octree_for_points(cache_points),
+        octree: cache_octree,
         octree_metadata: { max_display_points_snapshot: @max_display_points }
       }
     end
 
-    def create_downsampled_cache(base_cache, level)
+    def create_downsampled_cache(base_cache, level, build_octree: true)
       return base_cache if base_cache.nil? || level >= 0.999
 
       points = []
@@ -1291,7 +1310,83 @@ module PointCloudImporter
         point_indices << original_index
       end
 
-      create_cache(level, points, colors, index_lookup, point_indices)
+      create_cache(level, points, colors, index_lookup, point_indices, build_octree: build_octree)
+    end
+
+    def start_background_lod_build(base_cache, generation)
+      base_points = base_cache[:points]
+      base_colors = base_cache[:colors]
+      base_index_lookup = base_cache[:index_lookup]
+      base_point_indices = base_cache[:point_indices]
+
+      thread = Thread.new do
+        Thread.current.report_on_exception = false if Thread.current.respond_to?(:report_on_exception=)
+
+        begin
+          full_base_cache = create_cache(LOD_LEVELS.first,
+                                         base_points,
+                                         base_colors,
+                                         base_index_lookup,
+                                         base_point_indices,
+                                         build_octree: true)
+
+          lod_caches = { LOD_LEVELS.first => full_base_cache }
+          LOD_LEVELS[1..-1].each do |level|
+            lod_caches[level] = create_downsampled_cache(full_base_cache, level, build_octree: true)
+          end
+
+          spatial_index = build_spatial_index_for_cache(full_base_cache)
+
+          if @lod_cache_generation == generation
+            @lod_caches = lod_caches
+            assign_primary_cache(full_base_cache)
+            @spatial_index = spatial_index
+          end
+        rescue StandardError => error
+          warn_background_build_failure(error)
+        ensure
+          if @lod_cache_generation == generation
+            @lod_async_build_thread = nil
+            @lod_background_build_pending = false
+          end
+        end
+      end
+
+      thread.report_on_exception = false if thread.respond_to?(:report_on_exception=)
+      @lod_async_build_thread = thread
+    end
+
+    def build_spatial_index_for_cache(cache)
+      return nil unless cache
+
+      points = cache[:points]
+      indices = cache[:point_indices]
+
+      return nil unless points && indices
+      return nil if points.empty? || indices.empty?
+
+      SpatialIndex.new(points, indices)
+    end
+
+    def cancel_background_lod_build!
+      if @lod_async_build_thread&.alive?
+        @lod_async_build_thread.kill
+      end
+
+      @lod_async_build_thread = nil
+      @lod_background_build_pending = false
+    end
+
+    def build_octree_async?
+      !!@settings[:build_octree_async]
+    end
+
+    def warn_background_build_failure(error)
+      message = "[PointCloudImporter] Background cache build failed: #{error.message}"
+      backtrace = error.backtrace ? error.backtrace.join("\n") : nil
+      warn([message, backtrace].compact.join("\n"))
+    rescue StandardError
+      nil
     end
 
     def build_octree_for_points(points)
