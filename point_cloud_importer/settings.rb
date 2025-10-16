@@ -26,7 +26,8 @@ module PointCloudImporter
       auto_apply_changes: true,
       color_mode: :original,
       color_gradient: :viridis,
-      single_color: '#ffffff'
+      single_color: '#ffffff',
+      build_octree_async: true
     }.freeze
 
     attr_reader :values
