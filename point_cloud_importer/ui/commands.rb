@@ -4,6 +4,7 @@ require 'singleton'
 
 require_relative '../importer'
 require_relative '../ui/manager_dialog'
+require_relative '../ui/manager_panel'
 require_relative '../ui/first_import_wizard'
 require_relative '../ui/measurement_history_dialog'
 
@@ -17,6 +18,7 @@ module PointCloudImporter
         @toolbar = nil
         @commands = {}
         @manager = nil
+        @panel = nil
       end
 
       def self.instance(manager)
@@ -26,6 +28,11 @@ module PointCloudImporter
       end
 
       attr_writer :manager
+
+      def command(key)
+        ensure_commands!
+        @commands[key.to_sym]
+      end
 
       def register!
         ensure_commands!
@@ -70,6 +77,15 @@ module PointCloudImporter
         end
         @commands[:manage].tooltip = 'Настроить облака, плотность отображения и размеры точек'
 
+        @commands[:panel] = ::UI::Command.new('Point Cloud Manager') do
+          panel.show
+        end
+        @commands[:panel].tooltip = 'Открыть компактную панель управления облаками'
+        icon16 = icon_path('cloud_16.png')
+        icon24 = icon_path('cloud_24.png')
+        @commands[:panel].small_icon = icon16 if File.exist?(icon16)
+        @commands[:panel].large_icon = icon24 if File.exist?(icon24)
+
         @commands[:tutorial] = ::UI::Command.new('Point Cloud Tutorial') do
           UI::FirstImportWizard.show(@manager)
         end
@@ -97,13 +113,23 @@ module PointCloudImporter
         return if @toolbar
 
         @toolbar = ::UI::Toolbar.new('Point Cloud Importer')
-        @toolbar.add_item(@commands[:import])
-        @toolbar.add_item(@commands[:toggle_visibility])
-        @toolbar.add_item(@commands[:toggle_inference])
-        @toolbar.add_item(@commands[:measurement_tool])
-        @toolbar.add_item(@commands[:measurement_history])
-        @toolbar.add_item(@commands[:manage])
+        @toolbar.add_item(@commands[:panel])
         @toolbar.show
+      end
+
+      def panel
+        @panel ||= UI::ManagerPanel.new(@manager, self)
+      end
+
+      def icon_path(name)
+        File.expand_path(File.join('icons', name), __dir__)
+      end
+
+      def refresh_panel_if_visible
+        return unless @panel
+        return unless @panel.visible?
+
+        @panel.refresh!
       end
     end
   end
