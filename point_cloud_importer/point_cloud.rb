@@ -35,7 +35,6 @@ module PointCloudImporter
 
     LOD_FADE_DURATION = 0.35
 
-    BACKGROUND_TIMER_INTERVAL = 0.015
     BACKGROUND_OCTREE_SAMPLE_LIMIT = 100_000
     BACKGROUND_SPATIAL_SAMPLE_LIMIT = 120_000
 
@@ -1237,46 +1236,29 @@ module PointCloudImporter
       end
 
       @user_max_display_points = target_limit
-      @max_display_points = target_limit
 
-      startup_cap = [@max_display_points, 250_000].min
+      startup_cap = [target_limit, 250_000].min
       startup_cap = available_points if startup_cap <= 0 && available_points.positive?
       startup_cap = 250_000 if startup_cap <= 0
 
-      step = compute_step
-      base_points = []
-      base_colors = color_buffer_enabled? ? [] : nil
-      base_index_lookup = {}
-      base_point_indices = []
-
-      (0...points.length).step(step) do |index|
-        point = point3d_from(points[index])
-        next unless point
-
-        base_points << point
-        base_colors << display_color_for_index(index) if base_colors
-        base_index_lookup[index] = base_points.length - 1
-        base_point_indices << index
-        break if startup_cap.positive? && base_points.length >= startup_cap
+      base_cache = build_base_cache(limit: startup_cap)
+      if base_cache
+        atomic_swap_lod!(LOD_LEVELS.first, base_cache)
+      else
+        assign_primary_cache(nil)
       end
 
-      base_cache = create_cache(LOD_LEVELS.first,
-                                base_points,
-                                base_colors,
-                                base_index_lookup,
-                                base_point_indices)
-      @lod_caches[LOD_LEVELS.first] = base_cache
-
-      assign_primary_cache(base_cache)
       @lod_current_level ||= LOD_LEVELS.first
       @lod_previous_level = nil
       @lod_transition_start = nil
 
       if target_limit.positive? && target_limit > startup_cap && startup_cap.positive?
         @max_display_points = startup_cap
+      else
+        @max_display_points = target_limit
       end
 
-      start_background_lod_build(base_cache, current_generation, target_limit, startup_cap)
+      start_background_lod_build(target_limit, current_generation)
     end
 
     def ensure_display_caches!
@@ -1321,7 +1303,7 @@ module PointCloudImporter
       cache_index_lookup = index_lookup ? index_lookup : {}
       cache_point_indices = point_indices ? point_indices : []
 
-      {
+      cache = {
         level: level,
         points: cache_points,
         colors: cache_colors,
@@ -1330,6 +1312,80 @@ module PointCloudImporter
         octree: nil,
         octree_metadata: nil
       }
+
+      cache.define_singleton_method(:size) do
+        pts = self[:points]
+        pts ? pts.length : 0
+      end
+
+      cache.define_singleton_method(:length) do
+        size
+      end
+
+      cache
+    end
+
+    def build_base_cache(limit:)
+      return nil unless points && !points.empty?
+
+      step = compute_step(limit: limit)
+      base_points = []
+      base_colors = color_buffer_enabled? ? [] : nil
+      base_index_lookup = {}
+      base_point_indices = []
+
+      (0...points.length).step(step) do |index|
+        point = point3d_from(points[index])
+        next unless point
+
+        base_points << point
+        base_colors << display_color_for_index(index) if base_colors
+        base_index_lookup[index] = base_points.length - 1
+        base_point_indices << index
+        break if limit.to_i.positive? && base_points.length >= limit
+      end
+
+      create_cache(LOD_LEVELS.first,
+                   base_points,
+                   base_colors,
+                   base_index_lookup,
+                   base_point_indices)
+    end
+
+    def store_lod_cache(level, cache)
+      return unless cache
+
+      @lod_caches ||= {}
+      key = lod_level_key(level)
+      @lod_caches[key] = cache
+      if level == 0 || key == LOD_LEVELS.first
+        @lod_caches[LOD_LEVELS.first] = cache
+        @lod_caches[0] = cache
+      end
+      cache
+    end
+
+    def lod_level_key(level)
+      return LOD_LEVELS.first if level == 0
+
+      level
+    end
+
+    def base_lod_cache
+      return nil unless @lod_caches
+
+      @lod_caches[LOD_LEVELS.first] || @lod_caches[0]
+    end
+
+    def cache_size(cache)
+      return 0 unless cache
+
+      points = cache[:points]
+      points ? points.length : 0
+    end
+
+    def base_cache_point_count
+      cache_size(base_lod_cache)
     end
 
     def create_downsampled_cache(base_cache, level)
@@ -1358,43 +1414,52 @@ module PointCloudImporter
       create_cache(level, points, colors, index_lookup, point_indices)
     end
 
-    def start_background_lod_build(base_cache, generation, target_limit, startup_cap)
-      return unless base_cache
-
+    def start_background_lod_build(target_limit, generation)
       context = {
         generation: generation,
-        target_limit: target_limit,
-        startup_cap: startup_cap,
-        needs_ramp: target_limit.to_i.positive? && target_limit > startup_cap && startup_cap.positive?
+        target_limit: target_limit.to_i,
+        needs_ramp: target_limit.to_i.positive? && @max_display_points.to_i < target_limit.to_i
       }
 
       @lod_background_context = context
+      steps = prepare_background_steps(context)
+      @lod_background_tasks = steps.dup
       @max_display_point_ramp = nil
-      @lod_background_tasks = []
-
-      LOD_LEVELS[1..-1].each do |level|
-        @lod_background_tasks << { type: :lod_level, level: level }
-      end
-      @lod_background_tasks << { type: :octree_sampled }
-      @lod_background_tasks << { type: :spatial_index_sampled }
 
       queue_empty = @lod_background_tasks.empty? && !context[:needs_ramp]
-
       unless queue_empty
         @lod_background_build_pending = true
       end
+
+      maybe_start_max_display_point_ramp(context)
 
       if queue_empty
         finalize_background_build(context)
         return
       end
 
-      interval = BACKGROUND_TIMER_INTERVAL.clamp(0.01, 0.02)
+      run_steps_as_ui_timer(context)
+    end
 
+    def prepare_background_steps(context)
+      generation = context[:generation]
+      target_limit = context[:target_limit]
+
+      steps = []
+      steps << lambda { expand_lod0_to!(target_limit, generation) }
+      LOD_LEVELS[1..-1].each do |level|
+        steps << lambda { rebuild_lod!(level, generation) }
+      end
+      steps << lambda { build_octree_sampled(generation) }
+      steps << lambda { build_spatial_index_sampled(generation) }
+      steps
+    end
+
+    def run_steps_as_ui_timer(context)
       if defined?(UI) && UI.respond_to?(:start_timer)
         timer_id = nil
-        timer_id = UI.start_timer(interval, true) do
-          continue = process_background_build_tick
+        timer_id = UI.start_timer(0, true) do
+          continue = run_background_step_slice(context)
           next if continue
 
           if defined?(UI) && UI.respond_to?(:stop_timer)
@@ -1406,73 +1471,112 @@ module PointCloudImporter
 
         @lod_async_build_timer_id = timer_id
       else
-        while process_background_build_tick
+        while run_background_step_slice(context)
         end
 
         @lod_async_build_timer_id = nil
       end
     end
 
-    def process_background_build_tick
-      context = @lod_background_context
+    def run_background_step_slice(context)
       unless context && context[:generation] == @lod_cache_generation
         finalize_background_build(context)
         return false
       end
 
-      if @lod_background_tasks && !@lod_background_tasks.empty?
-        task = @lod_background_tasks.shift
-        perform_background_build_task(task, context)
-      end
+      start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-      if @lod_background_tasks && !@lod_background_tasks.empty?
-        return true
+      while @lod_background_tasks && !@lod_background_tasks.empty?
+        step = @lod_background_tasks.shift
+        execute_background_step(step, context)
+        throttled_invalidate_view
+
+        break if (Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time) >= 0.02
       end
 
       maybe_start_max_display_point_ramp(context)
+      ramp_active = continue_max_display_point_ramp
 
-      return true if continue_max_display_point_ramp
+      if (@lod_background_tasks.nil? || @lod_background_tasks.empty?) && !ramp_active
+        finalize_background_build(context)
+        return false
+      end
 
-      finalize_background_build(context)
-      false
+      true
     rescue StandardError => error
       warn_background_build_failure(error)
       finalize_background_build(context)
       false
     end
 
-    def perform_background_build_task(task, context)
-      return unless task
+    def execute_background_step(step, context)
+      return unless step
+      return unless context[:generation] == @lod_cache_generation
 
-      case task[:type]
-      when :lod_level
-        build_lod_level(task[:level], context[:generation])
-      when :octree_sampled
-        build_octree_sampled(context[:generation])
-      when :spatial_index_sampled
-        build_spatial_index_sampled(context[:generation])
-      end
+      step.call if step.respond_to?(:call)
     end
 
-    def build_lod_level(level, generation)
+    def expand_lod0_to!(target_limit, generation)
       return unless generation == @lod_cache_generation
 
-      caches = @lod_caches
-      return unless caches
+      target_limit = target_limit.to_i
+      return if target_limit <= 0
 
-      base_cache = caches[LOD_LEVELS.first]
+      base_cache = base_lod_cache
       return unless base_cache
 
-      caches[level] ||= create_downsampled_cache(base_cache, level)
+      current_size = cache_size(base_cache)
+      return if current_size >= target_limit
+
+      new_cache = build_base_cache(limit: target_limit)
+      return unless new_cache
+
+      atomic_swap_lod!(LOD_LEVELS.first, new_cache)
+    end
+
+    def rebuild_lod!(level, generation)
+      return unless generation == @lod_cache_generation
+
+      base_cache = base_lod_cache
+      return unless base_cache
+
+      new_cache = create_downsampled_cache(base_cache, level)
+      atomic_swap_lod!(level, new_cache) if new_cache
+    end
+
+    def atomic_swap_lod!(level, cache)
+      return unless cache
+
+      store_lod_cache(level, cache)
+
+      current_level = @lod_current_level || LOD_LEVELS.first
+      cache_level = lod_level_key(level)
+
+      assign_primary_cache(cache) if cache_level == current_level
+
+      throttled_invalidate_view
+    end
+
+    def throttled_invalidate_view
+      now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      last = (@_last_invalidate_at ||= 0.0)
+      return if (now - last) < 0.2
+
+      @_last_invalidate_at = now
+      view = @manager&.view
+      if view && view.respond_to?(:invalidate)
+        view.invalidate
+      else
+        invalidate_active_view
+      end
+    rescue StandardError
+      nil
     end
 
     def build_octree_sampled(generation)
       return unless generation == @lod_cache_generation
 
-      caches = @lod_caches
-      return unless caches
-
-      base_cache = caches[LOD_LEVELS.first]
+      base_cache = base_lod_cache
       return unless base_cache
 
       points = base_cache[:points]
@@ -1508,10 +1612,7 @@ module PointCloudImporter
     def build_spatial_index_sampled(generation)
       return unless generation == @lod_cache_generation
 
-      caches = @lod_caches
-      return unless caches
-
-      base_cache = caches[LOD_LEVELS.first]
+      base_cache = base_lod_cache
       return unless base_cache
 
       sampled_points, sampled_indices = sample_cache_points(base_cache, BACKGROUND_SPATIAL_SAMPLE_LIMIT)
@@ -1558,8 +1659,11 @@ module PointCloudImporter
       target_limit = context[:target_limit].to_i
       return if target_limit <= 0
 
+      effective_target = effective_ramp_target(target_limit)
+      return if effective_target <= 0
+
       current_limit = @max_display_points.to_i
-      return if current_limit >= target_limit
+      return if current_limit >= effective_target
 
       @max_display_point_ramp = { target: target_limit }
     end
@@ -1569,23 +1673,33 @@ module PointCloudImporter
       return false unless ramp
 
       target_limit = ramp[:target].to_i
-      return finalize_ramp if target_limit <= 0
+      effective_target = effective_ramp_target(target_limit)
+      return finalize_ramp if effective_target <= 0
 
       current_limit = @max_display_points.to_i
-      if current_limit >= target_limit
+      if current_limit >= effective_target
+        return true if effective_target < target_limit
+
         finalize_ramp
         return false
       end
 
-      increment = compute_max_display_point_increment(target_limit, current_limit)
-      increment = target_limit - current_limit if increment > (target_limit - current_limit)
+      effective_difference = effective_target - current_limit
+      return true if effective_difference <= 0 && effective_target < target_limit
+      return finalize_ramp if effective_difference <= 0
+
+      increment = compute_max_display_point_increment(effective_target, current_limit)
+      increment = effective_difference if increment > effective_difference
+      remaining_to_target = target_limit - current_limit
+      increment = remaining_to_target if increment > remaining_to_target
       increment = 1 if increment <= 0
 
       new_limit = current_limit + increment
       new_limit = target_limit if new_limit > target_limit
+      new_limit = effective_target if new_limit > effective_target
 
       @max_display_points = new_limit
-      invalidate_active_view
+      throttled_invalidate_view
 
       if new_limit >= target_limit
         finalize_ramp
@@ -1612,6 +1726,13 @@ module PointCloudImporter
 
       @max_display_point_ramp = nil
       false
+    end
+
+    def effective_ramp_target(target_limit)
+      base_size = base_cache_point_count
+      return target_limit.to_i if base_size <= 0
+
+      [target_limit.to_i, base_size].min
     end
 
     def invalidate_active_view
@@ -1641,6 +1762,7 @@ module PointCloudImporter
       @lod_background_tasks = nil
       @lod_background_context = nil
       @max_display_point_ramp = nil
+      @lod_async_build_timer_id = nil
     end
 
     def build_spatial_index_for_cache(cache)
@@ -1824,22 +1946,9 @@ module PointCloudImporter
 
     def invalidate_display_cache!
       @display_cache_dirty = true
-      @display_points = nil
-      @display_colors = nil
-      @display_index_lookup = nil
-      @display_point_indices = nil
-      @spatial_index = nil
-      clear_octree!
-      reset_frustum_cache!
-      @last_octree_query_stats = nil
-      @octree_metadata = nil
-      @lod_caches = nil
-      @lod_current_level = nil
-      @lod_previous_level = nil
-      @lod_transition_start = nil
     end
 
-    def compute_step
+    def compute_step(limit: nil)
       total_points = points.length
       return 1 if total_points <= 0
       return 1 if @display_density >= 0.999
@@ -1847,7 +1956,7 @@ module PointCloudImporter
       step = (1.0 / @display_density).round
       step = 1 if step < 1
 
-      configured_limit = @max_display_points.to_i
+      configured_limit = limit.nil? ? @max_display_points.to_i : limit.to_i
       configured_limit = 0 if configured_limit.negative?
       limit = configured_limit.positive? ? configured_limit : DEFAULT_DISPLAY_POINT_CAP
 
@@ -2051,7 +2160,7 @@ module PointCloudImporter
     def enforce_max_display_limit(indices)
       return [] if indices.nil?
 
-      limit = @max_display_points.to_i
+      limit = effective_display_limit
       return indices if limit <= 0 || indices.length <= limit
 
       step = (indices.length.to_f / limit).ceil
@@ -2069,6 +2178,16 @@ module PointCloudImporter
         result << index if (position % step).zero?
       end
       result
+    end
+
+    def effective_display_limit
+      limit = @max_display_points.to_i
+      return limit if limit <= 0
+
+      base_size = base_cache_point_count
+      return limit if base_size <= 0
+
+      [limit, base_size].min
     end
 
     def flush_index_batch(indices)
