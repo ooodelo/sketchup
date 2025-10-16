@@ -2506,13 +2506,15 @@ module PointCloudImporter
 
         if d.abs < 1e-9
           return nil if o < min_axis || o > max_axis
-          next
-        end
 
-        inv = 1.0 / d
-        t1 = (min_axis - o) * inv
-        t2 = (max_axis - o) * inv
-        t1, t2 = t2, t1 if t1 > t2
+          t1 = -Float::INFINITY
+          t2 = Float::INFINITY
+        else
+          inv = 1.0 / d
+          t1 = (min_axis - o) * inv
+          t2 = (max_axis - o) * inv
+          t1, t2 = t2, t1 if t1 > t2
+        end
 
         t_min = [t_min, t1].max
         t_max = [t_max, t2].min
