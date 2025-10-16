@@ -556,17 +556,17 @@ module PointCloudImporter
     end
 
     def bounding_box_corners(box)
-      min = box.min
-      max = box.max
+      min_point = box.min
+      max_point = box.max
       [
-        Geom::Point3d.new(min.x, min.y, min.z),
-        Geom::Point3d.new(max.x, min.y, min.z),
-        Geom::Point3d.new(min.x, max.y, min.z),
-        Geom::Point3d.new(max.x, max.y, min.z),
-        Geom::Point3d.new(min.x, min.y, max.z),
-        Geom::Point3d.new(max.x, min.y, max.z),
-        Geom::Point3d.new(min.x, max.y, max.z),
-        Geom::Point3d.new(max.x, max.y, max.z)
+        Geom::Point3d.new(min_point.x, min_point.y, min_point.z),
+        Geom::Point3d.new(max_point.x, min_point.y, min_point.z),
+        Geom::Point3d.new(min_point.x, max_point.y, min_point.z),
+        Geom::Point3d.new(max_point.x, max_point.y, min_point.z),
+        Geom::Point3d.new(min_point.x, min_point.y, max_point.z),
+        Geom::Point3d.new(max_point.x, min_point.y, max_point.z),
+        Geom::Point3d.new(min_point.x, max_point.y, max_point.z),
+        Geom::Point3d.new(max_point.x, max_point.y, max_point.z)
       ]
     end
 
