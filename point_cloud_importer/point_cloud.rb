@@ -136,6 +136,7 @@ module PointCloudImporter
       @bounds_max_y = nil
       @bounds_max_z = nil
       @display_cache_dirty = false
+      @render_cache_preparation_pending = false
       append_points!(points, colors, intensities) if points && !points.empty?
 
       @inference_sample_indices = nil
@@ -185,6 +186,7 @@ module PointCloudImporter
       @lod_current_level = nil
       @lod_previous_level = nil
       @lod_transition_start = nil
+      @render_cache_preparation_pending = false
     end
 
     def visible?
@@ -374,6 +376,21 @@ module PointCloudImporter
       build_display_cache! if @display_cache_dirty || @lod_caches.nil?
       refresh_inference_guides!
       self
+    end
+
+    def render_cache_preparation_pending?
+      !!@render_cache_preparation_pending
+    end
+
+    def mark_render_cache_preparation_pending!
+      return false if @render_cache_preparation_pending
+
+      @render_cache_preparation_pending = true
+      true
+    end
+
+    def clear_render_cache_preparation_pending!
+      @render_cache_preparation_pending = false
     end
 
     def draw(view)
