@@ -58,7 +58,7 @@ module PointCloudImporter
       return if values.nil? || values.empty?
 
       if values.length <= @chunk_capacity
-        @chunks << values.dup
+        @chunks << values
         @length += values.length
         return
       end
