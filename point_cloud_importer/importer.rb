@@ -21,7 +21,7 @@ module PointCloudImporter
     end
 
     def import_from_dialog
-      path = UI.openpanel('Выберите файл облака точек', nil, 'PLY (*.ply)|*.ply||')
+      path = ::UI.openpanel('Выберите файл облака точек', nil, 'PLY (*.ply)|*.ply||')
       return unless path
 
       options = prompt_options
@@ -119,7 +119,7 @@ module PointCloudImporter
       job.thread = worker
 
       timer_id = nil
-      timer_id = UI.start_timer(0.1, repeat: true) do
+      timer_id = ::UI.start_timer(0.1, repeat: true) do
         progress_dialog.update
         unless job.cloud_added?
           cloud = job.cloud
@@ -130,7 +130,7 @@ module PointCloudImporter
         end
         next unless job.finished?
 
-        UI.stop_timer(timer_id) if timer_id
+        ::UI.stop_timer(timer_id) if timer_id
         progress_dialog.close
         job.thread&.join
         finalize_job(job)
@@ -144,11 +144,11 @@ module PointCloudImporter
       when :failed
         cleanup_partial_cloud(job)
         @last_result = nil
-        UI.messagebox("Ошибка импорта: #{job.error.message}") if job.error
+        ::UI.messagebox("Ошибка импорта: #{job.error.message}") if job.error
       when :cancelled
         cleanup_partial_cloud(job)
         @last_result = nil
-        UI.messagebox('Импорт отменен пользователем.')
+        ::UI.messagebox('Импорт отменен пользователем.')
       else
         @last_result = nil
       end
@@ -172,7 +172,7 @@ module PointCloudImporter
         job.mark_cloud_added!
       end
 
-      UI.messagebox(
+      ::UI.messagebox(
         "Импорт завершен за #{format('%.2f', duration)} сек. " \
         "Импортировано #{format_point_count(cloud.points.length)} из #{format_point_count(total_vertices)} точек"
       )
@@ -181,7 +181,7 @@ module PointCloudImporter
       result
     rescue StandardError => e
       @last_result = nil
-      UI.messagebox("Ошибка импорта: #{e.message}")
+      ::UI.messagebox("Ошибка импорта: #{e.message}")
       nil
     end
 
@@ -208,7 +208,7 @@ module PointCloudImporter
       ]
       style_list = available_style_labels.join('|')
       lists = ['', style_list, '', '']
-      input = UI.inputbox(prompts, defaults, lists, 'Настройки визуализации')
+      input = ::UI.inputbox(prompts, defaults, lists, 'Настройки визуализации')
       return unless input
 
       point_size, style_label, density, max_points = input
