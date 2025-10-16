@@ -69,6 +69,8 @@ module PointCloudImporter
     def append_chunk(values)
       return if values.nil? || values.empty?
 
+      finalize_mutable_last_chunk!
+
       if values.length <= @chunk_capacity
         @chunks << values
         @length += values.length
@@ -132,6 +134,12 @@ module PointCloudImporter
     end
 
     private
+
+    def finalize_mutable_last_chunk!
+      return unless @mutable_last_chunk
+
+      trim_last_chunk!
+    end
 
     def resolve_index(index)
       return nil unless index.is_a?(Integer)

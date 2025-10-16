@@ -57,5 +57,18 @@ module PointCloudImporter
       assert_equal [4, 5], array.chunks.last
       assert_equal 2, array.chunks.last.length
     end
+
+    def test_append_chunk_trims_mutable_last_chunk
+      chunk_capacity = 4
+      array = ChunkedArray.new(chunk_capacity)
+
+      2.times { |index| array.append_direct!(index) }
+      array.append_chunk([2, 3, 4])
+
+      assert_equal 5, array.length
+      assert_equal [0, 1], array.chunks.first
+      assert_equal [2, 3, 4], array.chunks.last
+      assert_equal [0, 1, 2, 3, 4], array.to_a
+    end
   end
 end
