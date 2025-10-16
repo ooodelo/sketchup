@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Point Cloud Importer Tutorial</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+      }
+
+      body {
+        margin: 0;
+        background: #f5f7fb;
+        color: #1f1f1f;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #1e1f24;
+          color: #f0f0f0;
+        }
+
+        .wizard {
+          box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+          background: #2a2d37;
+        }
+
+        .step-indicator li.active::after,
+        .step-indicator li.completed::after {
+          background: #4cc9f0;
+        }
+
+        .card {
+          background: rgba(255, 255, 255, 0.05);
+        }
+      }
+
+      .wizard {
+        box-sizing: border-box;
+        max-width: 480px;
+        margin: 20px auto;
+        padding: 24px;
+        border-radius: 18px;
+        background: #ffffff;
+        box-shadow: 0 12px 32px rgba(17, 40, 82, 0.15);
+      }
+
+      h1 {
+        font-size: 22px;
+        margin: 0 0 10px;
+        text-align: center;
+      }
+
+      p.subtitle {
+        text-align: center;
+        margin: 0 0 24px;
+        color: #556;
+      }
+
+      .step-indicator {
+        display: flex;
+        padding: 0;
+        margin: 0 0 24px;
+        list-style: none;
+        justify-content: space-between;
+        counter-reset: steps;
+      }
+
+      .step-indicator li {
+        position: relative;
+        width: 24%;
+        text-align: center;
+        font-size: 12px;
+        color: #9aa0b2;
+      }
+
+      .step-indicator li::after {
+        counter-increment: steps;
+        content: counter(steps);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        margin-bottom: 6px;
+        background: #d9deed;
+        color: #5a6180;
+        font-weight: 600;
+      }
+
+      .step-indicator li.active {
+        color: #3452ff;
+      }
+
+      .step-indicator li.active::after,
+      .step-indicator li.completed::after {
+        background: #3452ff;
+        color: #ffffff;
+      }
+
+      .step {
+        display: none;
+        animation: fade-in 220ms ease-in;
+      }
+
+      .step.active {
+        display: block;
+      }
+
+      .card {
+        background: #f3f5fe;
+        border-radius: 14px;
+        padding: 16px 18px;
+        margin-bottom: 18px;
+      }
+
+      .card h2 {
+        margin: 0 0 8px;
+        font-size: 17px;
+      }
+
+      .card p {
+        margin: 4px 0;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+
+      .illustration {
+        border-radius: 12px;
+        border: 1px dashed #c8cee4;
+        background: repeating-linear-gradient(
+          -45deg,
+          rgba(52, 82, 255, 0.06),
+          rgba(52, 82, 255, 0.06) 12px,
+          rgba(52, 82, 255, 0.12) 12px,
+          rgba(52, 82, 255, 0.12) 24px
+        );
+        padding: 20px;
+        text-align: center;
+        font-size: 13px;
+        color: #3d4677;
+        margin-bottom: 16px;
+      }
+
+      .progress-demo {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin: 12px 0;
+      }
+
+      .progress-bar {
+        flex: 1;
+        height: 12px;
+        border-radius: 10px;
+        background: #d6daed;
+        overflow: hidden;
+      }
+
+      .progress-bar span {
+        display: block;
+        height: 100%;
+        width: 40%;
+        background: linear-gradient(90deg, #4cc9f0, #4361ee);
+        animation: progress-pulse 1.8s ease-in-out infinite;
+      }
+
+      @keyframes progress-pulse {
+        0% {
+          width: 15%;
+        }
+
+        50% {
+          width: 75%;
+        }
+
+        100% {
+          width: 25%;
+        }
+      }
+
+      .controls {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-top: 10px;
+      }
+
+      .controls button {
+        border: none;
+        border-radius: 8px;
+        padding: 10px 18px;
+        font-size: 14px;
+        cursor: pointer;
+        font-weight: 600;
+      }
+
+      button.secondary {
+        background: transparent;
+        color: #6b7393;
+      }
+
+      button.primary {
+        background: linear-gradient(135deg, #4361ee, #4cc9f0);
+        color: #fff;
+      }
+
+      button.primary:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      .step-footer {
+        font-size: 13px;
+        color: #667;
+      }
+
+      .manager-highlight {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        background: #3452ff;
+        color: #fff;
+        padding: 10px 14px;
+        border-radius: 10px;
+        box-shadow: 0 12px 22px rgba(52, 82, 255, 0.35);
+        margin: 12px 0;
+      }
+
+      .manager-highlight span.icon {
+        background: rgba(255, 255, 255, 0.25);
+        border-radius: 50%;
+        width: 26px;
+        height: 26px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+      }
+
+      .manager-highlight button {
+        background: rgba(255, 255, 255, 0.14);
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        padding: 6px 12px;
+        cursor: pointer;
+      }
+
+      @keyframes fade-in {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wizard">
+      <h1>Добро пожаловать!</h1>
+      <p class="subtitle">Краткий тур по импорту облака точек</p>
+
+      <ul class="step-indicator" id="stepIndicator">
+        <li class="active">PLY файл</li>
+        <li>Отображение</li>
+        <li>Импорт</li>
+        <li>Готово</li>
+      </ul>
+
+      <div class="step active" data-step="1">
+        <div class="card">
+          <h2>Шаг 1. Выберите PLY файл</h2>
+          <p>
+            Нажмите «Импорт облака точек…» и укажите файл формата PLY. Поддерживаются
+            облака с позициями <strong>(x, y, z)</strong>, цветами <strong>(r, g, b)</strong>
+            и дополнительными атрибутами.
+          </p>
+        </div>
+        <div class="illustration">
+          Примеры файлов: facade_scan.ply, room_scan_ascii.ply, survey.ply
+        </div>
+        <div class="step-footer">Совет: храните облака рядом с моделью SketchUp для удобства.</div>
+      </div>
+
+      <div class="step" data-step="2">
+        <div class="card">
+          <h2>Шаг 2. Настройте отображение</h2>
+          <p>
+            После выбора файла настройте размер и стиль точек. Попробуйте разные значения
+            плотности, чтобы найти баланс между производительностью и детализацией.
+          </p>
+        </div>
+        <div class="illustration">
+          <div>Размер точки</div>
+          <div style="display: flex; justify-content: center; gap: 18px; margin-top: 12px;">
+            <div>
+              <div style="font-size: 28px; color: #4361ee;">•</div>
+              <div style="font-size: 12px; color: #5b5b7a;">1 px</div>
+            </div>
+            <div>
+              <div style="font-size: 38px; color: #4895ef;">•</div>
+              <div style="font-size: 12px; color: #5b5b7a;">4 px</div>
+            </div>
+            <div>
+              <div style="font-size: 48px; color: #4cc9f0;">•</div>
+              <div style="font-size: 12px; color: #5b5b7a;">8 px</div>
+            </div>
+          </div>
+        </div>
+        <div class="step-footer">Все параметры можно позже поменять в менеджере облаков.</div>
+      </div>
+
+      <div class="step" data-step="3">
+        <div class="card">
+          <h2>Шаг 3. Импортируем…</h2>
+          <p>
+            Во время импорта появится индикатор прогресса. Вы можете отменить операцию
+            в любой момент — точки не будут добавлены в модель.
+          </p>
+        </div>
+        <div class="progress-demo">
+          <div class="progress-bar"><span></span></div>
+          <div style="font-size: 13px; color: #4a4f6d;">42%</div>
+        </div>
+        <div class="step-footer">Для больших облаков импорт может занять несколько минут.</div>
+      </div>
+
+      <div class="step" data-step="4">
+        <div class="card">
+          <h2>Шаг 4. Готово!</h2>
+          <p>
+            Используйте менеджер облаков, чтобы менять плотность, размер точек, активировать
+            привязки и управлять несколькими наборами данных.
+          </p>
+        </div>
+        <div class="manager-highlight">
+          <span class="icon">★</span>
+          <div>
+            <div id="managerLabel">Менеджер облаков</div>
+            <button type="button" id="openManager">Открыть</button>
+          </div>
+        </div>
+        <div class="step-footer">Менеджер также доступен на панели инструментов расширения.</div>
+      </div>
+
+      <div class="controls">
+        <button class="secondary" id="skipWizard">Пропустить</button>
+        <div>
+          <button class="secondary" id="prevStep" disabled>Назад</button>
+          <button class="primary" id="nextStep">Далее</button>
+          <button class="primary" id="finishWizard" style="display: none;">Готово</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      window.pciWizard = (function () {
+        let stepIndex = 0;
+        let steps = [];
+        let indicatorItems = [];
+        let payload = {};
+
+        function updateUI() {
+          steps.forEach((el, index) => {
+            el.classList.toggle('active', index === stepIndex);
+          });
+          indicatorItems.forEach((item, index) => {
+            item.classList.toggle('active', index === stepIndex);
+            item.classList.toggle('completed', index < stepIndex);
+          });
+
+          prevButton.disabled = stepIndex === 0;
+          nextButton.style.display = stepIndex >= steps.length - 1 ? 'none' : 'inline-flex';
+          finishButton.style.display = stepIndex >= steps.length - 1 ? 'inline-flex' : 'none';
+        }
+
+        function next() {
+          if (stepIndex < steps.length - 1) {
+            stepIndex += 1;
+            updateUI();
+          }
+        }
+
+        function prev() {
+          if (stepIndex > 0) {
+            stepIndex -= 1;
+            updateUI();
+          }
+        }
+
+        function skip() {
+          if (window.sketchup && window.sketchup.pci_wizard_complete) {
+            window.sketchup.pci_wizard_complete();
+          }
+        }
+
+        function finish() {
+          if (window.sketchup && window.sketchup.pci_wizard_complete) {
+            window.sketchup.pci_wizard_complete();
+          }
+        }
+
+        function openManager() {
+          if (window.sketchup && window.sketchup.pci_wizard_open_manager) {
+            window.sketchup.pci_wizard_open_manager();
+          }
+        }
+
+        function bootstrap(data) {
+          payload = data || {};
+          if (payload.manager_label) {
+            const label = document.getElementById('managerLabel');
+            if (label) {
+              label.textContent = payload.manager_label;
+            }
+          }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+          steps = Array.from(document.querySelectorAll('.step'));
+          indicatorItems = Array.from(document.querySelectorAll('#stepIndicator li'));
+          if (window.sketchup && window.sketchup.pci_wizard_ready) {
+            window.sketchup.pci_wizard_ready();
+          }
+          updateUI();
+        });
+
+        const nextButton = document.getElementById('nextStep');
+        const prevButton = document.getElementById('prevStep');
+        const finishButton = document.getElementById('finishWizard');
+        const skipButton = document.getElementById('skipWizard');
+        const openManagerButton = document.getElementById('openManager');
+
+        if (nextButton) {
+          nextButton.addEventListener('click', next);
+        }
+        if (prevButton) {
+          prevButton.addEventListener('click', prev);
+        }
+        if (finishButton) {
+          finishButton.addEventListener('click', finish);
+        }
+        if (skipButton) {
+          skipButton.addEventListener('click', skip);
+        }
+        if (openManagerButton) {
+          openManagerButton.addEventListener('click', openManager);
+        }
+
+        return {
+          bootstrap,
+        };
+      })();
+    </script>
+  </body>
+</html>

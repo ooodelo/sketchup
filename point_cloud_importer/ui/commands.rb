@@ -4,6 +4,7 @@ require 'singleton'
 
 require_relative '../importer'
 require_relative '../ui/manager_dialog'
+require_relative '../ui/first_import_wizard'
 
 module PointCloudImporter
   module UI
@@ -28,6 +29,7 @@ module PointCloudImporter
       def register!
         ensure_commands!
         add_menu_items
+        add_help_menu_items
         add_toolbar
       end
 
@@ -61,6 +63,11 @@ module PointCloudImporter
           UI::ManagerDialog.new(@manager).show
         end
         @commands[:manage].tooltip = 'Настроить облака, плотность отображения и размеры точек'
+
+        @commands[:tutorial] = ::UI::Command.new('Point Cloud Tutorial') do
+          UI::FirstImportWizard.show(@manager)
+        end
+        @commands[:tutorial].tooltip = 'Повторно открыть пошаговое обучение'
       end
 
       def add_menu_items
@@ -71,6 +78,12 @@ module PointCloudImporter
         menu.add_item(@commands[:toggle_visibility])
         menu.add_item(@commands[:toggle_inference])
         menu.add_item(@commands[:measurement_tool])
+      end
+
+      def add_help_menu_items
+        menu = ::UI.menu('Help')
+        menu.add_separator
+        menu.add_item(@commands[:tutorial])
       end
 
       def add_toolbar
