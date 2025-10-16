@@ -1208,7 +1208,7 @@ module PointCloudImporter
       return 0.0 if min.nil? || max.nil?
 
       range = max - min
-      return 0.0 if range.abs < Float::EPSILON
+      return 0.5 if range.abs < Float::EPSILON
 
       clamp01((value.to_f - min) / range)
     rescue StandardError
