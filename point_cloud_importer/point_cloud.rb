@@ -11,9 +11,10 @@ require_relative 'inference_sampler'
 module PointCloudImporter
   # Data structure representing a point cloud and display preferences.
   class PointCloud
-    attr_reader :name, :points, :colors, :bounding_box
+    attr_reader :name, :points, :colors, :intensities, :bounding_box
     attr_accessor :visible
     attr_reader :point_size, :point_style, :inference_sample_indices, :inference_mode
+    attr_reader :color_mode, :color_gradient
 
     POINT_STYLE_CANDIDATES = {
       square: %i[DRAW_POINTS_SQUARES DRAW_POINTS_SQUARE DRAW_POINTS_OPEN_SQUARE],
@@ -33,10 +34,61 @@ module PointCloudImporter
 
     LOD_FADE_DURATION = 0.35
 
-    def initialize(name:, points: nil, colors: nil, metadata: {}, chunk_capacity: ChunkedArray::DEFAULT_CHUNK_CAPACITY)
+    DEFAULT_SINGLE_COLOR_HEX = '#ffffff'
+
+    COLOR_MODE_DEFINITIONS = [
+      { key: :original, label: 'Original (PLY)', gradient: false, single_color: false },
+      { key: :height, label: 'By Height', gradient: true, single_color: false },
+      { key: :intensity, label: 'By Intensity', gradient: true, single_color: false },
+      { key: :single, label: 'Single Color', gradient: false, single_color: true },
+      { key: :random, label: 'Random', gradient: false, single_color: false },
+      { key: :rgb_xyz, label: 'RGB by XYZ', gradient: false, single_color: false }
+    ].map { |definition| definition.freeze }.freeze
+
+    COLOR_MODE_LOOKUP = COLOR_MODE_DEFINITIONS.each_with_object({}) do |definition, lookup|
+      lookup[definition[:key]] = definition
+    end.freeze
+
+    COLOR_GRADIENT_LABELS = {
+      viridis: 'Viridis',
+      jet: 'Jet',
+      grayscale: 'Grayscale',
+      magma: 'Magma'
+    }.freeze
+
+    COLOR_GRADIENTS = {
+      viridis: [
+        [0.0, [68, 1, 84]],
+        [0.25, [59, 82, 139]],
+        [0.5, [33, 145, 140]],
+        [0.75, [94, 201, 97]],
+        [1.0, [253, 231, 37]]
+      ].freeze,
+      jet: [
+        [0.0, [0, 0, 131]],
+        [0.35, [0, 255, 255]],
+        [0.5, [255, 255, 0]],
+        [0.75, [255, 0, 0]],
+        [1.0, [128, 0, 0]]
+      ].freeze,
+      grayscale: [
+        [0.0, [0, 0, 0]],
+        [1.0, [255, 255, 255]]
+      ].freeze,
+      magma: [
+        [0.0, [0, 0, 4]],
+        [0.25, [78, 18, 123]],
+        [0.5, [187, 55, 84]],
+        [0.75, [249, 142, 8]],
+        [1.0, [251, 252, 191]]
+      ].freeze
+    }.freeze
+
+    def initialize(name:, points: nil, colors: nil, intensities: nil, metadata: {}, chunk_capacity: ChunkedArray::DEFAULT_CHUNK_CAPACITY)
       @name = name
       @points = ChunkedArray.new(chunk_capacity)
       @colors = colors ? ChunkedArray.new(chunk_capacity) : nil
+      @intensities = intensities ? ChunkedArray.new(chunk_capacity) : nil
       @metadata = (metadata || {}).dup
       @visible = true
       @settings = Settings.instance
@@ -45,6 +97,9 @@ module PointCloudImporter
       persist_style!(@point_style) if @point_style != @settings[:point_style]
       @display_density = @settings[:density]
       @max_display_points = @settings[:max_display_points]
+      @color_mode = normalize_color_mode(@settings[:color_mode])
+      @color_gradient = normalize_color_gradient(@settings[:color_gradient])
+      @single_color = parse_color_setting(@settings[:single_color])
       @display_points = nil
       @display_colors = nil
       @display_index_lookup = nil
@@ -61,8 +116,11 @@ module PointCloudImporter
       @lod_current_level = nil
       @lod_previous_level = nil
       @lod_transition_start = nil
+      @intensity_min = nil
+      @intensity_max = nil
+      @random_seed = deterministic_seed_for(name)
       @bounding_box = Geom::BoundingBox.new
-      append_points!(points, colors) if points && !points.empty?
+      append_points!(points, colors, intensities) if points && !points.empty?
 
       @inference_sample_indices = nil
       @inference_mode = nil
@@ -71,7 +129,8 @@ module PointCloudImporter
       @finalizer_info = self.class.register_finalizer(self,
                                                       name: @name,
                                                       points: @points,
-                                                      colors: @colors)
+                                                      colors: @colors,
+                                                      intensities: @intensities)
     end
 
     def dispose!
@@ -79,6 +138,9 @@ module PointCloudImporter
       remove_inference_guides!
       @points = nil
       @colors = nil
+      @intensities = nil
+      @intensity_min = nil
+      @intensity_max = nil
       @bounding_box = nil
       mark_finalizer_disposed!
     end
@@ -139,6 +201,63 @@ module PointCloudImporter
 
     def density
       @display_density
+    end
+
+    def color_mode=(mode)
+      normalized = normalize_color_mode(mode)
+      normalized = :height if normalized == :intensity && !has_intensity?
+      return if normalized == @color_mode || normalized.nil?
+
+      @color_mode = normalized
+      settings = Settings.instance
+      settings[:color_mode] = @color_mode.to_s
+      invalidate_display_cache!
+      build_display_cache!
+    end
+
+    def color_gradient=(gradient)
+      normalized = normalize_color_gradient(gradient)
+      return if normalized.nil? || normalized == @color_gradient
+
+      @color_gradient = normalized
+      settings = Settings.instance
+      settings[:color_gradient] = @color_gradient.to_s
+
+      return unless color_mode_requires_gradient?
+
+      invalidate_display_cache!
+      build_display_cache!
+    end
+
+    def single_color=(value)
+      color = parse_color_setting(value)
+      return unless color
+      return if colors_equal?(@single_color, color)
+
+      @single_color = color
+      settings = Settings.instance
+      settings[:single_color] = color_to_hex(@single_color)
+
+      return unless color_mode_requires_single_color?
+
+      invalidate_display_cache!
+      build_display_cache!
+    end
+
+    def single_color
+      @single_color ||= parse_color_setting(DEFAULT_SINGLE_COLOR_HEX)
+    end
+
+    def has_original_colors?
+      @colors && @colors.length.positive?
+    end
+
+    def has_intensity?
+      @intensities && @intensities.length.positive?
+    end
+
+    def single_color_hex
+      color_to_hex(single_color)
     end
 
     def octree_debug_enabled?
@@ -443,9 +562,14 @@ module PointCloudImporter
 
         new_point = change[:point]
         new_color = change[:color]
+        new_intensity = change[:intensity]
 
         points[index] = new_point if new_point
         colors[index] = new_color if colors && !new_color.nil?
+        if @intensities && !new_intensity.nil?
+          @intensities[index] = new_intensity
+          update_intensity_range!([new_intensity])
+        end
       end
 
       invalidate_display_cache!
@@ -472,13 +596,18 @@ module PointCloudImporter
         @bounding_box.nil?
     end
 
-    def append_points!(points_chunk, colors_chunk = nil)
+    def append_points!(points_chunk, colors_chunk = nil, intensities_chunk = nil)
       return if points_chunk.nil? || points_chunk.empty?
 
       @points.append_chunk(points_chunk)
       if colors_chunk && !colors_chunk.empty?
         @colors ||= ChunkedArray.new(@points.chunk_capacity)
         @colors.append_chunk(colors_chunk)
+      end
+      if intensities_chunk && !intensities_chunk.empty?
+        @intensities ||= ChunkedArray.new(@points.chunk_capacity)
+        @intensities.append_chunk(intensities_chunk)
+        update_intensity_range!(intensities_chunk)
       end
 
       ensure_bounding_box_initialized!
@@ -511,6 +640,248 @@ module PointCloudImporter
       guides
     end
 
+    def color_buffer_enabled?
+      return false if @color_mode == :original && !has_original_colors?
+
+      true
+    end
+
+    def display_color_for_index(original_index)
+      case @color_mode
+      when :original
+        original_color_at(original_index)
+      when :height
+        point = @points[original_index]
+        point ? gradient_color(normalize_height(point)) : nil
+      when :intensity
+        intensity = intensity_at(original_index)
+        if !intensity.nil?
+          gradient_color(normalize_intensity(intensity))
+        else
+          point = @points[original_index]
+          point ? gradient_color(normalize_height(point)) : nil
+        end
+      when :single
+        Sketchup::Color.new(single_color)
+      when :random
+        random_color_for_index(original_index)
+      when :rgb_xyz
+        point = @points[original_index]
+        point ? rgb_from_xyz(point) : nil
+      else
+        original_color_at(original_index)
+      end
+    end
+
+    def original_color_at(index)
+      return nil unless @colors && index
+
+      color = @colors[index]
+      color ? Sketchup::Color.new(color) : Sketchup::Color.new(255, 255, 255)
+    rescue StandardError
+      Sketchup::Color.new(255, 255, 255)
+    end
+
+    def gradient_color(value)
+      stops = COLOR_GRADIENTS[@color_gradient] || COLOR_GRADIENTS[:viridis]
+      return Sketchup::Color.new(*stops.last[1]) unless stops && !stops.empty?
+
+      t = clamp01(value.to_f)
+      lower = stops.first
+      upper = stops.last
+
+      stops.each do |stop|
+        if t <= stop[0]
+          upper = stop
+          break
+        end
+        lower = stop
+      end
+
+      if upper == lower
+        components = lower[1]
+        return Sketchup::Color.new(components[0], components[1], components[2])
+      end
+
+      range = upper[0] - lower[0]
+      weight = range.abs < Float::EPSILON ? 0.0 : (t - lower[0]) / range
+      interpolated = lower[1].zip(upper[1]).map do |min_component, max_component|
+        (min_component + (max_component - min_component) * weight).round.clamp(0, 255)
+      end
+      Sketchup::Color.new(interpolated[0], interpolated[1], interpolated[2])
+    end
+
+    def clamp01(value)
+      [[value, 0.0].max, 1.0].min
+    rescue StandardError
+      0.0
+    end
+
+    def normalize_color_mode(mode)
+      return @color_mode if mode.nil?
+
+      key = case mode
+            when String then mode.strip.downcase.to_sym
+            else mode.to_sym
+            end
+
+      COLOR_MODE_LOOKUP[key] ? key : :original
+    rescue StandardError
+      :original
+    end
+
+    def normalize_color_gradient(gradient)
+      return @color_gradient if gradient.nil?
+
+      key = case gradient
+            when String then gradient.strip.downcase.to_sym
+            else gradient.to_sym
+            end
+
+      COLOR_GRADIENTS.key?(key) ? key : COLOR_GRADIENTS.keys.first
+    rescue StandardError
+      COLOR_GRADIENTS.keys.first
+    end
+
+    def parse_color_setting(value)
+      candidate = case value
+                  when Sketchup::Color
+                    value
+                  when String
+                    value.strip.empty? ? DEFAULT_SINGLE_COLOR_HEX : value
+                  else
+                    value
+                  end
+
+      color = Sketchup::Color.new(candidate || DEFAULT_SINGLE_COLOR_HEX)
+      Sketchup::Color.new(color)
+    rescue StandardError
+      Sketchup::Color.new(DEFAULT_SINGLE_COLOR_HEX)
+    end
+
+    def color_to_hex(color)
+      return DEFAULT_SINGLE_COLOR_HEX unless color
+
+      format('#%02x%02x%02x', color.red.to_i.clamp(0, 255), color.green.to_i.clamp(0, 255), color.blue.to_i.clamp(0, 255))
+    rescue StandardError
+      DEFAULT_SINGLE_COLOR_HEX
+    end
+
+    def colors_equal?(first, second)
+      return true if first.equal?(second)
+      return false unless first && second
+
+      first.red == second.red && first.green == second.green && first.blue == second.blue
+    rescue StandardError
+      false
+    end
+
+    def color_mode_requires_gradient?(mode = @color_mode)
+      definition = COLOR_MODE_LOOKUP[mode]
+      definition ? !!definition[:gradient] : false
+    end
+
+    def color_mode_requires_single_color?(mode = @color_mode)
+      definition = COLOR_MODE_LOOKUP[mode]
+      definition ? !!definition[:single_color] : false
+    end
+
+    def deterministic_seed_for(value)
+      seed = 0x811c9dc5
+      value.to_s.each_byte do |byte|
+        seed ^= byte
+        seed = (seed * 0x01000193) & 0xffffffff
+      end
+      seed
+    rescue StandardError
+      0x12345678
+    end
+
+    def random_color_for_index(index)
+      seed = (@random_seed + index.to_i * 1_103_515_245 + 12_345) & 0xffffffff
+      r = (((seed >> 16) & 0xff) / 2.0 + 64).round.clamp(0, 255)
+      g = (((seed >> 8) & 0xff) / 2.0 + 64).round.clamp(0, 255)
+      b = ((seed & 0xff) / 2.0 + 64).round.clamp(0, 255)
+      Sketchup::Color.new(r, g, b)
+    rescue StandardError
+      Sketchup::Color.new(255, 255, 255)
+    end
+
+    def intensity_at(index)
+      return nil unless @intensities && index
+
+      value = @intensities[index]
+      value&.to_f
+    rescue StandardError
+      nil
+    end
+
+    def normalize_intensity(value)
+      min = @intensity_min
+      max = @intensity_max
+      return 0.0 if min.nil? || max.nil?
+
+      range = max - min
+      return 0.0 if range.abs < Float::EPSILON
+
+      clamp01((value.to_f - min) / range)
+    rescue StandardError
+      0.0
+    end
+
+    def normalize_height(point)
+      return 0.5 unless point && @bounding_box
+
+      min_z = @bounding_box.min.z
+      max_z = @bounding_box.max.z
+      range = max_z - min_z
+      return 0.5 if range.abs < Float::EPSILON
+
+      clamp01((point.z.to_f - min_z) / range)
+    rescue StandardError
+      0.5
+    end
+
+    def rgb_from_xyz(point)
+      return Sketchup::Color.new(255, 255, 255) unless point && @bounding_box
+
+      min = @bounding_box.min
+      max = @bounding_box.max
+
+      x = normalize_component(point.x, min.x, max.x)
+      y = normalize_component(point.y, min.y, max.y)
+      z = normalize_component(point.z, min.z, max.z)
+
+      Sketchup::Color.new((x * 255).round.clamp(0, 255),
+                          (y * 255).round.clamp(0, 255),
+                          (z * 255).round.clamp(0, 255))
+    rescue StandardError
+      Sketchup::Color.new(255, 255, 255)
+    end
+
+    def normalize_component(value, minimum, maximum)
+      range = maximum - minimum
+      return 0.5 if range.abs < Float::EPSILON
+
+      clamp01((value.to_f - minimum) / range)
+    rescue StandardError
+      0.5
+    end
+
+    def update_intensity_range!(values)
+      return unless values
+
+      values.each do |raw|
+        next unless raw.respond_to?(:to_f)
+
+        value = raw.to_f
+        next unless value.finite?
+
+        @intensity_min = value if @intensity_min.nil? || value < @intensity_min
+        @intensity_max = value if @intensity_max.nil? || value > @intensity_max
+      end
+    end
+
     def build_display_cache!
       @spatial_index = nil
       clear_octree!
@@ -523,7 +894,7 @@ module PointCloudImporter
 
       step = compute_step
       base_points = []
-      base_colors = colors ? [] : nil
+      base_colors = color_buffer_enabled? ? [] : nil
       base_index_lookup = {}
       base_point_indices = []
 
@@ -532,7 +903,7 @@ module PointCloudImporter
         next unless point
 
         base_points << point
-        base_colors << colors[index] if base_colors
+        base_colors << display_color_for_index(index) if base_colors
         base_index_lookup[index] = base_points.length - 1
         base_point_indices << index
         break if base_points.length >= @max_display_points
@@ -1161,12 +1532,13 @@ module PointCloudImporter
         available_point_styles.first || :square
       end
 
-      def register_finalizer(instance, name:, points:, colors:)
+      def register_finalizer(instance, name:, points:, colors:, intensities: nil)
         info = {
           name: name,
           disposed: false,
           points_ref: points ? WeakRef.new(points) : nil,
-          colors_ref: colors ? WeakRef.new(colors) : nil
+          colors_ref: colors ? WeakRef.new(colors) : nil,
+          intensities_ref: intensities ? WeakRef.new(intensities) : nil
         }
 
         ObjectSpace.define_finalizer(instance, finalizer_proc(info))
@@ -1201,6 +1573,7 @@ module PointCloudImporter
         [].tap do |refs|
           refs << 'points' if weakref_alive?(info[:points_ref])
           refs << 'colors' if weakref_alive?(info[:colors_ref])
+          refs << 'intensities' if weakref_alive?(info[:intensities_ref])
         end
       end
 

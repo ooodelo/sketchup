@@ -3,6 +3,7 @@
 
 require 'json'
 require_relative '../settings'
+require_relative '../point_cloud'
 
 module PointCloudImporter
   module UI
@@ -86,6 +87,36 @@ module PointCloudImporter
           auto_apply_preferences_if_needed
           refresh
         end
+        @dialog.add_action_callback('pci_color_mode') do |_, cloud_index, mode|
+          cloud = validate_cloud_index(cloud_index)
+          next unless cloud
+
+          cloud.color_mode = mode
+          cloud.prepare_render_cache!
+          @manager.view&.invalidate
+          auto_apply_preferences_if_needed
+          refresh
+        end
+        @dialog.add_action_callback('pci_color_gradient') do |_, cloud_index, gradient|
+          cloud = validate_cloud_index(cloud_index)
+          next unless cloud
+
+          cloud.color_gradient = gradient
+          cloud.prepare_render_cache!
+          @manager.view&.invalidate
+          auto_apply_preferences_if_needed
+          refresh
+        end
+        @dialog.add_action_callback('pci_single_color') do |_, cloud_index, hex|
+          cloud = validate_cloud_index(cloud_index)
+          next unless cloud
+
+          cloud.single_color = hex
+          cloud.prepare_render_cache!
+          @manager.view&.invalidate
+          auto_apply_preferences_if_needed
+          refresh
+        end
         @dialog.add_action_callback('pci_toggle_inference') do |_, cloud_index|
           cloud = validate_cloud_index(cloud_index)
           next unless cloud
@@ -131,10 +162,17 @@ module PointCloudImporter
               metadata: cloud.metadata,
               inference: cloud.inference_enabled?,
               octree_debug: cloud.octree_debug_enabled?,
-              octree_stats: cloud.last_octree_query_stats
+              octree_stats: cloud.last_octree_query_stats,
+              color_mode: cloud.color_mode.to_s,
+              color_gradient: cloud.color_gradient.to_s,
+              single_color: cloud.single_color_hex,
+              has_colors: cloud.has_original_colors?,
+              has_intensity: cloud.has_intensity?
             }
           end,
-          auto_apply: auto_apply_enabled?
+          auto_apply: auto_apply_enabled?,
+          color_modes: serialize_color_modes,
+          gradients: serialize_color_gradients
         }
         @dialog.execute_script("window.pci && window.pci.update(#{JSON.generate(payload)});")
       end
@@ -166,6 +204,23 @@ module PointCloudImporter
         return unless auto_apply_enabled?
 
         Settings.instance.save!
+      end
+
+      def serialize_color_modes
+        PointCloud::COLOR_MODE_DEFINITIONS.map do |definition|
+          {
+            value: definition[:key].to_s,
+            label: definition[:label],
+            requires_gradient: !!definition[:gradient],
+            requires_single_color: !!definition[:single_color]
+          }
+        end
+      end
+
+      def serialize_color_gradients
+        PointCloud::COLOR_GRADIENT_LABELS.map do |key, label|
+          { value: key.to_s, label: label }
+        end
       end
     end
   end

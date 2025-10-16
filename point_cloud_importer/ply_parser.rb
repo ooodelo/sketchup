@@ -49,6 +49,7 @@ module PointCloudImporter
     RED_PROPERTY_NAMES = %w[red diffuse_red r].freeze
     GREEN_PROPERTY_NAMES = %w[green diffuse_green g].freeze
     BLUE_PROPERTY_NAMES = %w[blue diffuse_blue b].freeze
+    INTENSITY_PROPERTY_NAMES = %w[intensity intensity_0 reflectance greyscale].freeze
 
     attr_reader :path, :total_vertex_count, :metadata
 
@@ -65,16 +66,22 @@ module PointCloudImporter
 
       collector_points = []
       collector_colors = []
+      collector_intensities = []
       has_colors = false
+      has_intensity = false
 
       emitter = if block_given?
                   block
                 else
-                  lambda do |points_chunk, colors_chunk, _processed|
+                  lambda do |points_chunk, colors_chunk, intensities_chunk, _processed|
                     collector_points.concat(points_chunk)
                     if colors_chunk
                       has_colors = true
                       collector_colors.concat(colors_chunk)
+                    end
+                    if intensities_chunk
+                      has_intensity = true
+                      collector_intensities.concat(intensities_chunk)
                     end
                   end
                 end
@@ -102,7 +109,8 @@ module PointCloudImporter
         @metadata
       else
         colors_result = has_colors ? collector_colors : nil
-        [collector_points, colors_result, @metadata]
+        intensities_result = has_intensity ? collector_intensities : nil
+        [collector_points, colors_result, intensities_result, @metadata]
       end
     end
 
@@ -153,9 +161,11 @@ module PointCloudImporter
       vertex_count = header[:vertex_count] ? header[:vertex_count].to_i : 0
       property_index_by_name = header[:property_index_by_name]
       color_indices = color_property_indices(property_index_by_name)
+      intensity_index = intensity_property_index(property_index_by_name)
 
       points_chunk = []
       colors_chunk = color_indices ? [] : nil
+      intensities_chunk = intensity_index ? [] : nil
       processed = 0
 
       vertex_count.times do |index|
@@ -165,19 +175,21 @@ module PointCloudImporter
         break unless line
 
         values = line.split
-        point, color = interpret_vertex(values, property_index_by_name, color_indices)
+        point, color, intensity = interpret_vertex(values, property_index_by_name, color_indices, intensity_index)
         points_chunk << point
         colors_chunk << color if colors_chunk
+        intensities_chunk << intensity if intensities_chunk
         processed += 1
 
         next unless points_chunk.length >= chunk_size
 
-        emit_chunk(points_chunk, colors_chunk, processed, block)
+        emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
         points_chunk = []
         colors_chunk = color_indices ? [] : nil
+        intensities_chunk = intensity_index ? [] : nil
       end
 
-      emit_chunk(points_chunk, colors_chunk, processed, block)
+      emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
     end
 
     def parse_binary(io, header, chunk_size, &block)
@@ -193,12 +205,14 @@ module PointCloudImporter
       properties = header[:properties]
       property_index_by_name = header[:property_index_by_name]
       color_indices = color_property_indices(property_index_by_name)
+      intensity_index = intensity_property_index(property_index_by_name)
 
       stride = properties.sum { |property| bytesize(property[:type]) }
       vertex_buffer = ''.b
 
       points_chunk = []
       colors_chunk = color_indices ? [] : nil
+      intensities_chunk = intensity_index ? [] : nil
       processed = 0
 
       vertex_count.times do |index|
@@ -209,31 +223,35 @@ module PointCloudImporter
 
         vertex_buffer.replace(data)
         values = unpack_binary(vertex_buffer, properties, endian: endian)
-        point, color = interpret_vertex(values, property_index_by_name, color_indices)
+        point, color, intensity = interpret_vertex(values, property_index_by_name, color_indices, intensity_index)
         points_chunk << point
         colors_chunk << color if colors_chunk
+        intensities_chunk << intensity if intensities_chunk
         processed += 1
 
         next unless points_chunk.length >= chunk_size
 
-        emit_chunk(points_chunk, colors_chunk, processed, block)
+        emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
         points_chunk = []
         colors_chunk = color_indices ? [] : nil
+        intensities_chunk = intensity_index ? [] : nil
       end
 
-      emit_chunk(points_chunk, colors_chunk, processed, block)
+      emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
     end
 
-    def emit_chunk(points_chunk, colors_chunk, processed, block)
+    def emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
       return if points_chunk.nil? || points_chunk.empty?
 
       colors_arg = colors_chunk
       colors_arg = nil if colors_arg.is_a?(Array) && colors_arg.empty?
+      intensities_arg = intensities_chunk
+      intensities_arg = nil if intensities_arg.is_a?(Array) && intensities_arg.empty?
 
-      block&.call(points_chunk, colors_arg, processed)
+      block&.call(points_chunk, colors_arg, intensities_arg, processed)
     end
 
-    def interpret_vertex(values, property_index_by_name, color_indices)
+    def interpret_vertex(values, property_index_by_name, color_indices, intensity_index)
       x = values[property_index_by_name['x']].to_f
       y = values[property_index_by_name['y']].to_f
       z = values[property_index_by_name['z']].to_f
@@ -243,7 +261,8 @@ module PointCloudImporter
                 r_index, g_index, b_index = color_indices
                 Sketchup::Color.new(values[r_index].to_i, values[g_index].to_i, values[b_index].to_i)
               end
-      [point, color]
+      intensity = intensity_index ? values[intensity_index].to_f : nil
+      [point, color, intensity]
     end
 
     def unpack_binary(buffer, properties, endian: :little)
@@ -298,6 +317,14 @@ module PointCloudImporter
       return nil unless red_index && green_index && blue_index
 
       [red_index, green_index, blue_index]
+    end
+
+    def intensity_property_index(property_index_by_name)
+      INTENSITY_PROPERTY_NAMES.each do |name|
+        return property_index_by_name[name] if property_index_by_name.key?(name)
+      end
+
+      nil
     end
 
     def validate_header!(header)
