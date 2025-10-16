@@ -69,8 +69,11 @@ module PointCloudImporter
       @progress_estimator = ProgressEstimator.new
     end
 
-    def parse(chunk_size: DEFAULT_CHUNK_SIZE, &block)
-      chunk_size = [chunk_size.to_i, 1].max
+    def parse(chunk_size: nil, &block)
+      config = configuration
+      default_chunk_size = config&.chunk_size || DEFAULT_CHUNK_SIZE
+      chunk_size = sanitize_positive_integer(chunk_size, default_chunk_size)
+      chunk_size = config.sanitize_chunk_size(chunk_size) if config
 
       collector_points = []
       collector_colors = []
@@ -204,9 +207,11 @@ module PointCloudImporter
       intensities_chunk = intensity_index ? [] : nil
       processed = 0
 
+      yield_interval = configuration_value(:yield_interval, THREAD_YIELD_INTERVAL)
+
       vertex_count.times do |index|
         check_cancelled!
-        Thread.pass if (index % THREAD_YIELD_INTERVAL).zero? && index.positive?
+        Thread.pass if yield_interval.positive? && (index % yield_interval).zero? && index.positive?
         line = io.gets
         current_pos = io.pos
         consumed_bytes = [current_pos - @last_data_position, 0].max
@@ -251,7 +256,11 @@ module PointCloudImporter
 
       stride = properties.sum { |property| bytesize(property[:type]) }
       chunk_size = [chunk_size.to_i, 1].max
-      max_vertices_per_buffer = [BINARY_READ_BUFFER_SIZE / stride, 1].max
+
+      buffer_size = configuration_value(:binary_buffer_size, BINARY_READ_BUFFER_SIZE)
+      max_vertices_per_buffer = [buffer_size / stride, 1].max
+
+      yield_interval = configuration_value(:yield_interval, THREAD_YIELD_INTERVAL)
 
       processed = 0
 
@@ -281,7 +290,7 @@ module PointCloudImporter
 
           processed += 1
 
-          Thread.pass if (processed % THREAD_YIELD_INTERVAL).zero? && processed.positive?
+          Thread.pass if yield_interval.positive? && (processed % yield_interval).zero? && processed.positive?
 
           if points_chunk.length >= chunk_size
             emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
@@ -308,6 +317,46 @@ module PointCloudImporter
       intensities_arg = nil if intensities_arg.is_a?(Array) && intensities_arg.empty?
 
       block&.call(points_chunk, colors_arg, intensities_arg, processed)
+    end
+
+    def configuration
+      defined?(PointCloudImporter::Config) ? PointCloudImporter::Config : nil
+    end
+
+    def configuration_value(key, fallback)
+      config = configuration
+      return fallback unless config
+
+      case key
+      when :yield_interval
+        config.sanitize_yield_interval(config.yield_interval)
+      when :binary_buffer_size
+        config.sanitize_binary_buffer_size(config.binary_buffer_size)
+      when :chunk_size
+        config.sanitize_chunk_size(config.chunk_size)
+      else
+        fallback
+      end
+    rescue StandardError
+      fallback
+    end
+
+    def sanitize_positive_integer(value, default)
+      candidate =
+        case value
+        when nil
+          nil
+        when Integer
+          value
+        when Numeric
+          value.to_i
+        else
+          Integer(value)
+        end
+      candidate = nil if candidate.nil? || candidate < 1
+      candidate || [default, 1].max
+    rescue ArgumentError, TypeError
+      [default, 1].max
     end
 
     def interpret_vertex(values, property_index_by_name, color_indices, intensity_index)

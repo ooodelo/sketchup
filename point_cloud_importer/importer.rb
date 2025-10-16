@@ -78,12 +78,31 @@ module PointCloudImporter
 
           name = File.basename(job.path, '.*')
           settings = Settings.instance
-          chunk_size = job.options[:chunk_size] || settings[:import_chunk_size] || PlyParser::DEFAULT_CHUNK_SIZE
-          chunk_size = chunk_size.to_i
-          chunk_size = 1 if chunk_size < 1
-          invalidate_every_n_chunks = job.options[:invalidate_every_n_chunks] || settings[:invalidate_every_n_chunks] || 1
-          invalidate_every_n_chunks = invalidate_every_n_chunks.to_i
-          invalidate_every_n_chunks = 1 if invalidate_every_n_chunks < 1
+          config = defined?(PointCloudImporter::Config) ? PointCloudImporter::Config : nil
+
+          default_chunk_size = config&.chunk_size || 1_000_000
+          chunk_size_source = job.options[:chunk_size] || settings[:import_chunk_size] || default_chunk_size
+          chunk_size = if config
+                         config.sanitize_chunk_size(chunk_size_source)
+                       else
+                         value = chunk_size_source || default_chunk_size
+                         value = value.to_i
+                         value = 1 if value < 1
+                         value
+                       end
+
+          default_invalidation = config&.invalidate_every_n_chunks || 1
+          invalidate_source = job.options[:invalidate_every_n_chunks] ||
+                              settings[:invalidate_every_n_chunks] ||
+                              default_invalidation
+          invalidate_every_n_chunks = if config
+                                         config.sanitize_invalidate_every_n_chunks(invalidate_source)
+                                       else
+                                         value = invalidate_source || default_invalidation
+                                         value = value.to_i
+                                         value = 1 if value < 1
+                                         value
+                                       end
 
           cloud = PointCloud.new(name: name, metadata: parser.metadata || {})
           job.cloud = cloud
