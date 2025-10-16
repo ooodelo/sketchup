@@ -14,6 +14,7 @@ module PointCloudImporter
     PROGRESS_REPORT_INTERVAL = 0.5
     THREAD_YIELD_INTERVAL = 10_000
     BINARY_READ_BUFFER_SIZE = 1_048_576
+    DEFAULT_BINARY_VERTEX_BATCH_SIZE = 4_096
 
 
     TYPE_MAP = {
@@ -110,6 +111,8 @@ module PointCloudImporter
         @estimated_progress = 0.0
         @last_data_position = io.pos
         @last_report_time = monotonic_time - PROGRESS_REPORT_INTERVAL
+
+        @format_string_cache = {}
 
         report_progress(force: true)
 
@@ -260,9 +263,15 @@ module PointCloudImporter
       buffer_size = configuration_value(:binary_buffer_size, BINARY_READ_BUFFER_SIZE)
       max_vertices_per_buffer = [buffer_size / stride, 1].max
 
+      batch_size_preference = configuration_value(:binary_vertex_batch_size,
+                                                  DEFAULT_BINARY_VERTEX_BATCH_SIZE)
+      batch_size_preference = batch_size_preference.to_i
+      batch_size_preference = DEFAULT_BINARY_VERTEX_BATCH_SIZE if batch_size_preference < 1
+
       yield_interval = configuration_value(:yield_interval, THREAD_YIELD_INTERVAL)
 
       processed = 0
+      property_count = properties.length
 
       points_chunk = []
       colors_chunk = color_indices ? [] : nil
@@ -270,19 +279,26 @@ module PointCloudImporter
 
       while processed < vertex_count
         check_cancelled!
+
         remaining = vertex_count - processed
-        batch_size = [max_vertices_per_buffer, remaining].min
+        batch_size = [batch_size_preference, max_vertices_per_buffer, remaining].min
         bytes_to_read = stride * batch_size
         raw_data = io.read(bytes_to_read)
         break unless raw_data && raw_data.bytesize == bytes_to_read
 
-        offset = 0
-        batch_size.times do
-          vertex_slice = raw_data.byteslice(offset, stride)
-          offset += stride
+        flat_values = raw_data.unpack(
+          build_format_string(properties, endian: endian, batch_size: batch_size)
+        )
 
-          values = unpack_binary(vertex_slice, properties, endian: endian)
-          point, color, intensity = interpret_vertex(values, property_index_by_name, color_indices, intensity_index)
+        batch_size.times do |index|
+          base_offset = index * property_count
+          point, color, intensity = interpret_vertex(
+            flat_values,
+            property_index_by_name,
+            color_indices,
+            intensity_index,
+            base_offset: base_offset
+          )
 
           points_chunk << point
           colors_chunk << color if colors_chunk
@@ -292,12 +308,12 @@ module PointCloudImporter
 
           Thread.pass if yield_interval.positive? && (processed % yield_interval).zero? && processed.positive?
 
-          if points_chunk.length >= chunk_size
-            emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
-            points_chunk = []
-            colors_chunk = color_indices ? [] : nil
-            intensities_chunk = intensity_index ? [] : nil
-          end
+          next unless points_chunk.length >= chunk_size
+
+          emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
+          points_chunk = []
+          colors_chunk = color_indices ? [] : nil
+          intensities_chunk = intensity_index ? [] : nil
         end
 
         update_progress(processed_vertices: processed, consumed_bytes: bytes_to_read)
@@ -332,6 +348,8 @@ module PointCloudImporter
         config.sanitize_yield_interval(config.yield_interval)
       when :binary_buffer_size
         config.sanitize_binary_buffer_size(config.binary_buffer_size)
+      when :binary_vertex_batch_size
+        config.sanitize_binary_vertex_batch_size(config.binary_vertex_batch_size)
       when :chunk_size
         config.sanitize_chunk_size(config.chunk_size)
       else
@@ -359,34 +377,24 @@ module PointCloudImporter
       [default, 1].max
     end
 
-    def interpret_vertex(values, property_index_by_name, color_indices, intensity_index)
-      x = values[property_index_by_name['x']].to_f
-      y = values[property_index_by_name['y']].to_f
-      z = values[property_index_by_name['z']].to_f
+    def interpret_vertex(values, property_index_by_name, color_indices, intensity_index, base_offset: nil)
+      base = base_offset || 0
+
+      x = values[base + property_index_by_name['x']].to_f
+      y = values[base + property_index_by_name['y']].to_f
+      z = values[base + property_index_by_name['z']].to_f
 
       point = [x, y, z]
       color = if color_indices
                 r_index, g_index, b_index = color_indices
-                [values[r_index].to_i, values[g_index].to_i, values[b_index].to_i]
+                [
+                  values[base + r_index].to_i,
+                  values[base + g_index].to_i,
+                  values[base + b_index].to_i
+                ]
               end
-      intensity = intensity_index ? values[intensity_index].to_f : nil
+      intensity = intensity_index ? values[base + intensity_index].to_f : nil
       [point, color, intensity]
-    end
-
-    def unpack_binary(buffer, properties, endian: :little)
-      pointer = 0
-      values = []
-      properties.each do |property|
-        type = property[:type]
-        format = format_for_type(type, endian)
-        raise UnsupportedFormat, "Неизвестный тип #{type}" unless format
-
-        size = bytesize(type)
-        slice = buffer.byteslice(pointer, size)
-        pointer += size
-        values << slice.unpack1(format)
-      end
-      values
     end
 
     def bytesize(type)
@@ -411,6 +419,22 @@ module PointCloudImporter
       return TYPE_MAP[type] if endian == :little
 
       TYPE_MAP["#{type}_be"] || TYPE_MAP[type]
+    end
+
+    def build_format_string(properties, endian:, batch_size: 1)
+      @format_string_cache ||= {}
+      key = [properties.map { |property| property[:type] }, endian, batch_size]
+      @format_string_cache[key] ||= begin
+        per_vertex = properties.map do |property|
+          type = property[:type]
+          format = format_for_type(type, endian)
+          raise UnsupportedFormat, "Неизвестный тип #{type}" unless format
+
+          format
+        end.join
+
+        per_vertex * batch_size
+      end
     end
 
     def color_property_indices(property_index_by_name)

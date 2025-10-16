@@ -15,6 +15,7 @@ module PointCloudImporter
       chunk_size: 1_000_000,
       yield_interval: 10_000,
       binary_buffer_size: 1_048_576,
+      binary_vertex_batch_size: 4_096,
       invalidate_every_n_chunks: 5,
       build_octree_async: true,
       logging_enabled: true,
@@ -43,6 +44,14 @@ module PointCloudImporter
 
     def binary_buffer_size=(value)
       @binary_buffer_size = positive_integer(value, DEFAULTS[:binary_buffer_size])
+    end
+
+    def binary_vertex_batch_size
+      @binary_vertex_batch_size ||= DEFAULTS[:binary_vertex_batch_size]
+    end
+
+    def binary_vertex_batch_size=(value)
+      @binary_vertex_batch_size = positive_integer(value, DEFAULTS[:binary_vertex_batch_size])
     end
 
     def invalidate_every_n_chunks
@@ -86,6 +95,7 @@ module PointCloudImporter
       self.invalidate_every_n_chunks = settings[:invalidate_every_n_chunks]
       self.yield_interval = settings[:yield_interval]
       self.binary_buffer_size = settings[:binary_buffer_size]
+      self.binary_vertex_batch_size = settings[:binary_vertex_batch_size]
       self.build_octree_async = settings[:build_octree_async]
       self.logging_enabled = settings[:logging_enabled]
       self.metrics_enabled = settings[:metrics_enabled]
@@ -102,6 +112,8 @@ module PointCloudImporter
         self.yield_interval = value
       when :binary_buffer_size
         self.binary_buffer_size = value
+      when :binary_vertex_batch_size
+        self.binary_vertex_batch_size = value
       when :build_octree_async
         self.build_octree_async = value
       when :logging_enabled
@@ -121,6 +133,10 @@ module PointCloudImporter
 
     def sanitize_binary_buffer_size(value)
       positive_integer(value, binary_buffer_size)
+    end
+
+    def sanitize_binary_vertex_batch_size(value)
+      positive_integer(value, binary_vertex_batch_size)
     end
 
     def sanitize_invalidate_every_n_chunks(value)

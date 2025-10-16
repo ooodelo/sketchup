@@ -63,6 +63,155 @@ module PointCloudImporter
       assert max_read_length <= PlyParser::BINARY_READ_BUFFER_SIZE
     end
 
+    def test_binary_parser_handles_xyz_only
+      vertex_count = 1_024
+      vertices = Array.new(vertex_count) do |index|
+        [index.to_f, index.to_f + 0.5, index.to_f + 1.0]
+      end
+      path = write_binary_ply(vertices, properties: %i[x y z])
+
+      parser = PlyParser.new(path)
+      points, colors, intensities, = parser.parse(chunk_size: 500)
+
+      assert_equal vertex_count, points.length
+      assert_nil colors
+      assert_nil intensities
+      assert_equal [0.0, 0.5, 1.0], points.first
+      assert_equal [vertex_count - 1, vertex_count - 0.5, vertex_count], points.last
+    end
+
+    def test_binary_parser_handles_xyzrgb_big_endian
+      vertex_count = 2_048
+      vertices = Array.new(vertex_count) do |index|
+        [
+          index.to_f,
+          index.to_f + 1.0,
+          index.to_f + 2.0,
+          (index % 256),
+          ((index + 1) % 256),
+          ((index + 2) % 256)
+        ]
+      end
+      path = write_binary_ply(vertices, properties: %i[x y z red green blue], format: :big)
+
+      parser = PlyParser.new(path)
+      points, colors, intensities, = parser.parse(chunk_size: 1_000)
+
+      assert_equal vertex_count, points.length
+      refute_nil colors
+      assert_nil intensities
+      assert_equal [0.0, 1.0, 2.0], points.first
+      assert_equal [0, 1, 2], colors.first
+      assert_equal [vertex_count - 1, vertex_count, vertex_count + 1], points.last
+    end
+
+    def test_binary_parser_handles_xyz_with_intensity
+      vertex_count = 3_000
+      vertices = Array.new(vertex_count) do |index|
+        [
+          index.to_f,
+          index.to_f + 0.25,
+          index.to_f + 0.5,
+          index.to_f / 100.0
+        ]
+      end
+      path = write_binary_ply(vertices, properties: %i[x y z intensity])
+
+      parser = PlyParser.new(path)
+      points, colors, intensities, = parser.parse(chunk_size: 512)
+
+      assert_equal vertex_count, points.length
+      assert_nil colors
+      refute_nil intensities
+      assert_in_delta 0.0, intensities.first
+      assert_in_delta((vertex_count - 1) / 100.0, intensities.last)
+    end
+
+    def test_binary_parser_progress_callback_respects_interval
+      vertex_count = 12_500
+      vertices = Array.new(vertex_count) do |index|
+        [
+          index.to_f,
+          index.to_f + 0.5,
+          index.to_f + 1.0,
+          (index % 256),
+          ((index + 1) % 256),
+          ((index + 2) % 256)
+        ]
+      end
+      path = write_binary_ply(vertices, properties: %i[x y z red green blue])
+
+      progress_calls = []
+
+      parser = PlyParser.new(path, progress_callback: lambda do |payload|
+        progress_calls << payload.dup
+      end)
+
+      parser.singleton_class.class_eval do
+        attr_accessor :_mock_times
+
+        def monotonic_time
+          @_mock_times ||= Array.new(50, 0.0) + Array.new(50, 1.0) + Array.new(50, 2.0)
+          value = @_mock_times.shift
+          value = @_mock_times.last if value.nil?
+          value || 2.0
+        end
+      end
+
+      parser.parse(chunk_size: 1_000)
+
+      refute_empty progress_calls
+      assert progress_calls.length <= 3, 'expected progress to be reported at most three times'
+      assert_equal vertex_count, progress_calls.last[:processed_vertices]
+    end
+
+    def test_binary_parser_cancellation_respects_time_checks
+      vertex_count = 10_000
+      vertices = Array.new(vertex_count) do |index|
+        [
+          index.to_f,
+          index.to_f + 0.5,
+          index.to_f + 1.0,
+          (index % 256),
+          ((index + 1) % 256),
+          ((index + 2) % 256)
+        ]
+      end
+      path = write_binary_ply(vertices, properties: %i[x y z red green blue])
+
+      should_cancel = false
+      progress_calls = []
+
+      parser = PlyParser.new(
+        path,
+        progress_callback: lambda do |payload|
+          progress_calls << payload
+          should_cancel = payload[:processed_vertices].positive?
+        end,
+        cancelled_callback: lambda do
+          should_cancel
+        end
+      )
+
+      parser.singleton_class.class_eval do
+        attr_accessor :_mock_times
+
+        def monotonic_time
+          @_mock_times ||= Array.new(20, 0.0) + Array.new(20, 0.3) + Array.new(20, 0.8)
+          value = @_mock_times.shift
+          value = @_mock_times.last if value.nil?
+          value || 0.8
+        end
+      end
+
+      assert_raises(PlyParser::Cancelled) do
+        parser.parse(chunk_size: 1_000)
+      end
+
+      assert progress_calls.any? { |payload| payload[:processed_vertices].positive? },
+             'expected progress callback to receive a non-zero processed vertex count'
+    end
+
     def test_thread_yields_without_affecting_output
       vertex_count = (PlyParser::THREAD_YIELD_INTERVAL * 2) + 5
       vertices = Array.new(vertex_count) do |index|
@@ -112,33 +261,59 @@ module PointCloudImporter
 
     private
 
-    def write_binary_ply(vertices)
+    def write_binary_ply(vertices, properties: default_properties, format: :little)
       tempfile = Tempfile.new(['ply_parser_binary_test', '.ply'])
       tempfile.binmode
+      format_token = format == :big ? 'binary_big_endian' : 'binary_little_endian'
       header = <<~PLY
         ply
-        format binary_little_endian 1.0
+        format #{format_token} 1.0
         element vertex #{vertices.length}
-        property float x
-        property float y
-        property float z
-        property uchar red
-        property uchar green
-        property uchar blue
-        property float intensity
+#{property_header_lines(properties).join("\n")}
         end_header
       PLY
       tempfile.write(header)
 
+      float_directive = format == :big ? 'g' : 'e'
+
       vertices.each do |vertex|
-        x, y, z, r, g, b, intensity = vertex
-        tempfile.write([x, y, z].pack('e3'))
-        tempfile.write([r, g, b].pack('C3'))
-        tempfile.write([intensity].pack('e'))
+        values = vertex.dup
+        properties.each do |property|
+          value = values.shift
+          case property
+          when :x, :y, :z
+            tempfile.write([value].pack(float_directive))
+          when :red, :green, :blue
+            tempfile.write([value].pack('C'))
+          when :intensity
+            tempfile.write([value].pack(float_directive))
+          else
+            raise ArgumentError, "Unsupported property #{property.inspect}"
+          end
+        end
       end
       tempfile.flush
       @tempfiles << tempfile
       tempfile.path
+    end
+
+    def property_header_lines(properties)
+      properties.map do |property|
+        case property
+        when :x, :y, :z
+          "        property float #{property}"
+        when :red, :green, :blue
+          "        property uchar #{property}"
+        when :intensity
+          "        property float intensity"
+        else
+          raise ArgumentError, "Unsupported property #{property.inspect}"
+        end
+      end
+    end
+
+    def default_properties
+      %i[x y z red green blue intensity]
     end
 
     def wrap_file_open(target_path)
