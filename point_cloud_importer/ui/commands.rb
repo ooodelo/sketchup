@@ -5,6 +5,7 @@ require 'singleton'
 require_relative '../importer'
 require_relative '../ui/manager_dialog'
 require_relative '../ui/first_import_wizard'
+require_relative '../ui/measurement_history_dialog'
 
 module PointCloudImporter
   module UI
@@ -59,6 +60,11 @@ module PointCloudImporter
         end
         @commands[:measurement_tool].tooltip = 'Интерактивное измерение между точками'
 
+        @commands[:measurement_history] = ::UI::Command.new('История измерений...') do
+          UI::MeasurementHistoryDialog.new(@manager).show
+        end
+        @commands[:measurement_history].tooltip = 'Просмотреть последние измерения'
+
         @commands[:manage] = ::UI::Command.new('Менеджер облаков...') do
           UI::ManagerDialog.new(@manager).show
         end
@@ -78,6 +84,7 @@ module PointCloudImporter
         menu.add_item(@commands[:toggle_visibility])
         menu.add_item(@commands[:toggle_inference])
         menu.add_item(@commands[:measurement_tool])
+        menu.add_item(@commands[:measurement_history])
       end
 
       def add_help_menu_items
@@ -94,6 +101,7 @@ module PointCloudImporter
         @toolbar.add_item(@commands[:toggle_visibility])
         @toolbar.add_item(@commands[:toggle_inference])
         @toolbar.add_item(@commands[:measurement_tool])
+        @toolbar.add_item(@commands[:measurement_history])
         @toolbar.add_item(@commands[:manage])
         @toolbar.show
       end

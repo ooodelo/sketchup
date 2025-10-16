@@ -6,6 +6,7 @@ require 'thread'
 require_relative 'point_cloud'
 require_relative 'viewer_overlay'
 require_relative 'measure_tool'
+require_relative 'measurement_history'
 
 module PointCloudImporter
   # Central registry for loaded point clouds.
@@ -17,6 +18,7 @@ module PointCloudImporter
       @clouds = []
       @overlay = nil
       @active_cloud = nil
+      @measurement_history = MeasurementHistory.new(self)
     end
 
     def clouds
@@ -125,6 +127,8 @@ module PointCloudImporter
 
         cloud.draw(view)
       end
+
+      draw_preview_measurement(view)
     end
 
     def pick_point(view, x, y)
@@ -140,6 +144,48 @@ module PointCloudImporter
 
     def measurement_tool
       MeasureTool.new(self)
+    end
+
+    def measurement_history
+      @measurement_history
+    end
+
+    def save_measurement_as_dimension(entry)
+      return unless entry
+
+      model = Sketchup.active_model
+      return unless model
+
+      from = entry[:from]
+      to = entry[:to]
+      return unless from && to
+
+      vector = to - from
+      return if vector.length.zero?
+
+      offset = vector.cross(Geom::Vector3d.new(0, 0, 1))
+      offset = vector.cross(Geom::Vector3d.new(0, 1, 0)) if offset.length.zero?
+      offset = vector.cross(Geom::Vector3d.new(1, 0, 0)) if offset.length.zero?
+      return if offset.length.zero?
+
+      offset.normalize!
+      offset_length = [vector.length * 0.25, 0.1.m].max
+      offset *= offset_length
+
+      point_on_dim = to.offset(offset)
+
+      entities = model.active_entities
+      model.start_operation('Create Measurement Dimension', true)
+      dimension = entities.add_dimension_linear(from, to, point_on_dim)
+      dimension.text = entry[:label] if dimension.respond_to?(:text=) && entry[:label]
+      model.commit_operation
+      dimension
+    rescue StandardError => e
+      model.abort_operation if model && model.respond_to?(:abort_operation)
+      warn("[PointCloudImporter] Failed to create dimension: #{e.message}")
+      nil
+    ensure
+      view&.invalidate
     end
 
     private
@@ -158,6 +204,24 @@ module PointCloudImporter
       else
         @clouds_lock.synchronize { yield }
       end
+    end
+
+    def draw_preview_measurement(view)
+      measurement = @measurement_history.preview_entry
+      return unless measurement
+
+      from = measurement[:from]
+      to = measurement[:to]
+      return unless from && to
+
+      view.line_width = 2
+      view.drawing_color = Sketchup::Color.new(0, 170, 255)
+      view.draw_polyline(from, to)
+
+      mid_point = Geom.linear_combination(0.5, from, 0.5, to)
+      screen = view.screen_coords(mid_point)
+      label = measurement[:label] || Sketchup.format_length(measurement[:distance])
+      view.draw_text(screen, label, size: 14, color: Sketchup::Color.new(255, 255, 255))
     end
   end
 end
