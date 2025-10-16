@@ -21,6 +21,7 @@ module PointCloudImporter
       invalidate_every_n_chunks: 5,
       yield_interval: 10_000,
       binary_buffer_size: 1_048_576,
+      binary_vertex_batch_size: 4_096,
       dialog_width: 420,
       dialog_height: 520,
       panel_width: 340,
@@ -102,7 +103,8 @@ module PointCloudImporter
         value.to_sym
       when :single_color
         value.to_s
-      when :import_chunk_size, :invalidate_every_n_chunks, :yield_interval, :binary_buffer_size
+      when :import_chunk_size, :invalidate_every_n_chunks, :yield_interval, :binary_buffer_size,
+           :binary_vertex_batch_size
         value.to_i
       when :dialog_width, :dialog_height, :panel_width, :panel_height, :point_size, :max_display_points
         value.to_i
