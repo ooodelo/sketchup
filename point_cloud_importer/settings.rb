@@ -19,6 +19,8 @@ module PointCloudImporter
       sampling_target: 500_000,
       dialog_width: 420,
       dialog_height: 520,
+      panel_width: 340,
+      panel_height: 440,
       auto_apply_changes: true,
       color_mode: :original,
       color_gradient: :viridis,

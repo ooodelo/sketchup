@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Point Cloud Manager</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --pci-bg: #1f1f1f;
+      --pci-elevated: #2a2a2a;
+      --pci-border: rgba(255, 255, 255, 0.06);
+      --pci-text: #f5f5f5;
+      --pci-muted: rgba(245, 245, 245, 0.65);
+      --pci-accent: #4f9cff;
+      --pci-accent-strong: #1b74e4;
+      --pci-danger: #ff6b6b;
+    }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--pci-bg);
+      color: var(--pci-text);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    header {
+      padding: 16px;
+      border-bottom: 1px solid var(--pci-border);
+    }
+
+    .title {
+      font-size: 15px;
+      font-weight: 600;
+      margin: 0;
+    }
+
+    .subtitle {
+      margin: 4px 0 0;
+      font-size: 12px;
+      color: var(--pci-muted);
+    }
+
+    .tab-bar {
+      display: flex;
+      gap: 4px;
+      padding: 8px 16px 0;
+    }
+
+    .tab {
+      flex: none;
+      padding: 8px 14px;
+      border-radius: 999px;
+      font-size: 12px;
+      background: transparent;
+      color: var(--pci-muted);
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: background 120ms ease, color 120ms ease, border 120ms ease;
+    }
+
+    .tab.active {
+      background: rgba(79, 156, 255, 0.14);
+      color: var(--pci-text);
+      border-color: rgba(79, 156, 255, 0.4);
+    }
+
+    main {
+      flex: 1 1 auto;
+      overflow-y: auto;
+      padding: 12px 16px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    .cloud-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .empty-state {
+      padding: 24px;
+      border-radius: 12px;
+      text-align: center;
+      background: var(--pci-elevated);
+      border: 1px dashed var(--pci-border);
+      color: var(--pci-muted);
+      font-size: 13px;
+    }
+
+    .cloud-card {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px;
+      border-radius: 12px;
+      background: var(--pci-elevated);
+      border: 1px solid var(--pci-border);
+      transition: border 120ms ease, box-shadow 120ms ease;
+    }
+
+    .cloud-card.active {
+      border-color: rgba(79, 156, 255, 0.6);
+      box-shadow: 0 0 0 1px rgba(79, 156, 255, 0.35);
+    }
+
+    .cloud-card__row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .cloud-card__row.secondary {
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--pci-muted);
+    }
+
+    .cloud-card__info {
+      flex: 1 1 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .cloud-card__name {
+      font-weight: 600;
+      font-size: 13px;
+      line-height: 1.3;
+    }
+
+    .cloud-card__meta {
+      font-size: 11px;
+      color: var(--pci-muted);
+    }
+
+    .button-icon,
+    .ghost-button {
+      border: none;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 8px;
+      transition: background 120ms ease, color 120ms ease;
+    }
+
+    .button-icon:hover,
+    .ghost-button:hover,
+    .ghost-button:focus-visible {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--pci-text);
+    }
+
+    .ghost-button {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .visibility-toggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      cursor: pointer;
+      background: rgba(255, 255, 255, 0.04);
+      transition: background 120ms ease, border 120ms ease;
+    }
+
+    .visibility-toggle.hidden {
+      opacity: 0.5;
+    }
+
+    .visibility-toggle svg {
+      width: 18px;
+      height: 18px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.5;
+    }
+
+    .menu {
+      position: relative;
+    }
+
+    .menu-button {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.04);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+
+    .menu-button span {
+      font-size: 18px;
+      line-height: 1;
+      letter-spacing: 2px;
+      margin-top: -2px;
+    }
+
+    .menu-popover {
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 0;
+      background: var(--pci-elevated);
+      border: 1px solid var(--pci-border);
+      border-radius: 10px;
+      padding: 6px 0;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+      min-width: 160px;
+      z-index: 10;
+      display: none;
+    }
+
+    .menu-popover.open {
+      display: block;
+    }
+
+    .menu-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 14px;
+      font-size: 12px;
+      color: var(--pci-text);
+      cursor: pointer;
+      transition: background 120ms ease;
+    }
+
+    .menu-item:hover {
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .menu-item.danger {
+      color: var(--pci-danger);
+    }
+
+    .tools-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 12px;
+    }
+
+    .tool-button {
+      border: none;
+      border-radius: 12px;
+      padding: 16px;
+      background: var(--pci-elevated);
+      color: var(--pci-text);
+      font-size: 13px;
+      font-weight: 600;
+      text-align: left;
+      cursor: pointer;
+      border: 1px solid var(--pci-border);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      transition: border 120ms ease, box-shadow 120ms ease;
+    }
+
+    .tool-button span {
+      font-size: 11px;
+      color: var(--pci-muted);
+      font-weight: 400;
+    }
+
+    .tool-button.primary {
+      background: linear-gradient(140deg, rgba(79, 156, 255, 0.18), rgba(79, 156, 255, 0.05));
+      border-color: rgba(79, 156, 255, 0.35);
+    }
+
+    .tool-button:disabled {
+      opacity: 0.4;
+      cursor: default;
+      box-shadow: none;
+    }
+
+    .tool-button:not(:disabled):hover {
+      border-color: rgba(79, 156, 255, 0.55);
+      box-shadow: 0 0 0 1px rgba(79, 156, 255, 0.25);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1 class="title">Point Cloud Manager</h1>
+    <p class="subtitle">Управление облаками и инструментами</p>
+  </header>
+
+  <nav class="tab-bar" role="tablist">
+    <button class="tab active" data-tab="clouds" role="tab" aria-selected="true">Clouds</button>
+    <button class="tab" data-tab="tools" role="tab" aria-selected="false">Tools</button>
+  </nav>
+
+  <main>
+    <section id="tab-clouds" role="tabpanel" aria-labelledby="clouds-tab">
+      <div id="cloud-list" class="cloud-list"></div>
+      <div id="cloud-empty" class="empty-state hidden">
+        Облака точек не загружены. Импортируйте облако, чтобы начать работу.
+      </div>
+    </section>
+    <section id="tab-tools" class="hidden" role="tabpanel" aria-labelledby="tools-tab">
+      <div class="tools-grid">
+        <button class="tool-button primary" data-action="import">
+          Import
+          <span>Загрузить новое PLY облако</span>
+        </button>
+        <button class="tool-button" data-action="measure">
+          Measure
+          <span>Инструмент измерений по точкам</span>
+        </button>
+        <button class="tool-button" data-action="export">
+          Export
+          <span>Сохранить активное облако в PLY</span>
+        </button>
+        <button class="tool-button" data-action="settings">
+          Settings
+          <span>Открыть расширенные настройки</span>
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    (function() {
+      const tabs = document.querySelectorAll('.tab');
+      const panels = {
+        clouds: document.getElementById('tab-clouds'),
+        tools: document.getElementById('tab-tools'),
+      };
+
+      tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+          const target = tab.dataset.tab;
+          tabs.forEach(t => {
+            t.classList.toggle('active', t === tab);
+            t.setAttribute('aria-selected', t === tab ? 'true' : 'false');
+          });
+          Object.entries(panels).forEach(([name, panel]) => {
+            panel.classList.toggle('hidden', name !== target);
+          });
+        });
+      });
+
+      const state = {
+        clouds: [],
+        menu: null,
+      };
+
+      function closeMenu() {
+        if (state.menu) {
+          state.menu.classList.remove('open');
+          state.menu = null;
+        }
+      }
+
+      document.addEventListener('click', event => {
+        if (!event.target.closest('.menu')) {
+          closeMenu();
+        }
+      });
+
+      function formatPoints(value) {
+        if (typeof value !== 'number') return '';
+        if (value >= 1_000_000) {
+          return `${(value / 1_000_000).toFixed(1)}M`;
+        }
+        if (value >= 1_000) {
+          return `${(value / 1_000).toFixed(1)}K`;
+        }
+        return `${value}`;
+      }
+
+      function renderClouds() {
+        const list = document.getElementById('cloud-list');
+        const emptyState = document.getElementById('cloud-empty');
+        list.innerHTML = '';
+
+        if (!state.clouds.length) {
+          emptyState.classList.remove('hidden');
+          return;
+        }
+
+        emptyState.classList.add('hidden');
+
+        state.clouds.forEach((cloud, index) => {
+          const card = document.createElement('article');
+          card.className = `cloud-card${cloud.active ? ' active' : ''}`;
+          card.dataset.index = index;
+
+          const row = document.createElement('div');
+          row.className = 'cloud-card__row';
+
+          const toggle = document.createElement('button');
+          toggle.className = `visibility-toggle${cloud.visible ? '' : ' hidden'}`;
+          toggle.title = cloud.visible ? 'Скрыть облако' : 'Показать облако';
+          toggle.innerHTML = `
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 5C6 5 2.73 9.11 1 12c1.73 2.89 5 7 11 7s9.27-4.11 11-7c-1.73-2.89-5-7-11-7Zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8Z"></path>
+            </svg>`;
+          toggle.addEventListener('click', event => {
+            event.stopPropagation();
+            window.sketchup && window.sketchup.pci_panel_toggle_visibility(index);
+          });
+
+          const info = document.createElement('div');
+          info.className = 'cloud-card__info';
+          info.innerHTML = `
+            <div class="cloud-card__name">${cloud.name}</div>
+            <div class="cloud-card__meta">${formatPoints(cloud.points)} pts</div>
+          `;
+
+          const menu = document.createElement('div');
+          menu.className = 'menu';
+          const menuButton = document.createElement('button');
+          menuButton.className = 'menu-button';
+          menuButton.title = 'Дополнительно';
+          menuButton.innerHTML = '<span>⋯</span>';
+          const popover = document.createElement('div');
+          popover.className = 'menu-popover';
+          popover.innerHTML = `
+            <div class="menu-item" data-action="activate">Сделать активным</div>
+            <div class="menu-item" data-action="details">Подробные настройки</div>
+            <div class="menu-item danger" data-action="remove">Удалить</div>
+          `;
+
+          menuButton.addEventListener('click', event => {
+            event.stopPropagation();
+            if (state.menu && state.menu !== popover) {
+              closeMenu();
+            }
+            popover.classList.toggle('open');
+            state.menu = popover.classList.contains('open') ? popover : null;
+          });
+
+          popover.querySelectorAll('.menu-item').forEach(item => {
+            item.addEventListener('click', event => {
+              event.stopPropagation();
+              const action = item.dataset.action;
+              if (!action) return;
+              switch (action) {
+                case 'activate':
+                  window.sketchup && window.sketchup.pci_panel_activate(index);
+                  break;
+                case 'details':
+                  window.sketchup && window.sketchup.pci_panel_open_manager(index);
+                  break;
+                case 'remove':
+                  if (confirm('Удалить облако?')) {
+                    window.sketchup && window.sketchup.pci_panel_remove(index);
+                  }
+                  break;
+                default:
+                  break;
+              }
+              closeMenu();
+            });
+          });
+
+          menu.appendChild(menuButton);
+          menu.appendChild(popover);
+
+          row.appendChild(toggle);
+          row.appendChild(info);
+          row.appendChild(menu);
+          card.appendChild(row);
+
+          const secondaryRow = document.createElement('div');
+          secondaryRow.className = 'cloud-card__row secondary';
+
+          const activateButton = document.createElement('button');
+          activateButton.className = 'ghost-button';
+          activateButton.textContent = cloud.active ? 'Активно' : 'Активировать';
+          activateButton.disabled = cloud.active;
+          activateButton.addEventListener('click', event => {
+            event.stopPropagation();
+            window.sketchup && window.sketchup.pci_panel_activate(index);
+          });
+
+          const inferenceStatus = document.createElement('span');
+          inferenceStatus.textContent = cloud.inference ? 'Привязка: вкл' : 'Привязка: выкл';
+
+          secondaryRow.appendChild(activateButton);
+          secondaryRow.appendChild(inferenceStatus);
+          card.appendChild(secondaryRow);
+
+          card.addEventListener('click', () => {
+            window.sketchup && window.sketchup.pci_panel_activate(index);
+          });
+
+          list.appendChild(card);
+        });
+      }
+
+      function updateToolButtons(payload) {
+        const buttons = document.querySelectorAll('.tool-button');
+        buttons.forEach(button => {
+          const action = button.dataset.action;
+          if (action === 'measure' || action === 'export') {
+            button.disabled = !payload.has_active_cloud;
+          }
+        });
+      }
+
+      const toolHandlers = {
+        import: () => window.sketchup && window.sketchup.pci_panel_import(),
+        measure: () => window.sketchup && window.sketchup.pci_panel_measure(),
+        export: () => window.sketchup && window.sketchup.pci_panel_export(),
+        settings: () => window.sketchup && window.sketchup.pci_panel_settings(),
+      };
+
+      document.querySelectorAll('.tool-button').forEach(button => {
+        button.addEventListener('click', () => {
+          const action = button.dataset.action;
+          const handler = toolHandlers[action];
+          if (typeof handler === 'function' && !button.disabled) {
+            handler();
+          }
+        });
+      });
+
+      window.pciPanel = {
+        update(payload) {
+          state.clouds = payload.clouds || [];
+          renderClouds();
+          updateToolButtons(payload);
+        }
+      };
+
+      window.addEventListener('load', () => {
+        window.sketchup && window.sketchup.pci_panel_ready();
+      });
+    })();
+  </script>
+</body>
+</html>

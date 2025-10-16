@@ -38,6 +38,7 @@ module PointCloudImporter
 
         @active_cloud = cloud
       end
+      refresh_ui_panel
     end
 
     def add_cloud(cloud)
@@ -61,6 +62,7 @@ module PointCloudImporter
       removed_cloud.dispose!
       warn_unless_disposed(removed_cloud)
       view.invalidate if view
+      refresh_ui_panel
     end
 
     def clear!
@@ -87,6 +89,8 @@ module PointCloudImporter
       if overlay_to_remove
         model.model_overlays.remove(overlay_to_remove)
       end
+
+      refresh_ui_panel
     end
 
     def ensure_overlay!
@@ -104,6 +108,7 @@ module PointCloudImporter
       cloud.visible = !cloud.visible?
       cloud.sync_inference_visibility!
       view.invalidate if view
+      refresh_ui_panel
     end
 
     def toggle_active_inference_guides
@@ -113,6 +118,7 @@ module PointCloudImporter
 
       cloud.toggle_inference_guides!(model)
       view.invalidate if view
+      refresh_ui_panel
     end
 
     def view
@@ -148,6 +154,29 @@ module PointCloudImporter
 
     def measurement_history
       @measurement_history
+    end
+
+    def export_active_cloud
+      cloud = active_cloud
+      unless cloud
+        ::UI.messagebox('Нет активного облака для экспорта.')
+        return
+      end
+
+      default_name = cloud.name.to_s.strip
+      default_name = 'point_cloud' if default_name.empty?
+      default_name = default_name.gsub(/[^\w\-.]+/, '_')
+      default_name << '.ply' unless default_name.downcase.end_with?('.ply')
+
+      path = ::UI.savepanel('Экспорт облака точек', nil, default_name)
+      return unless path
+
+      begin
+        cloud.export_to_ply(path)
+        ::UI.messagebox("Облако успешно экспортировано в #{File.basename(path)}.")
+      rescue StandardError => e
+        ::UI.messagebox("Не удалось экспортировать облако: #{e.message}")
+      end
     end
 
     def save_measurement_as_dimension(entry)
@@ -196,6 +225,14 @@ module PointCloudImporter
       warn("[PointCloudImporter] Облако '#{cloud.name}' не полностью освобождено после dispose!")
     rescue StandardError => e
       warn("[PointCloudImporter] Не удалось проверить состояние облака '#{cloud.name}': #{e.message}")
+    end
+
+    def refresh_ui_panel
+      return unless defined?(PointCloudImporter::UI::Commands)
+
+      PointCloudImporter::UI::Commands.instance(self).refresh_panel_if_visible
+    rescue StandardError => e
+      warn("[PointCloudImporter] Не удалось обновить панель: #{e.message}")
     end
 
     def with_clouds_lock
