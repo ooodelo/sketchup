@@ -188,6 +188,7 @@ module PointCloudImporter
     extend self
 
     def activate
+      Thread.abort_on_exception = true
       PointCloudImporter::Settings.instance.load!
       PointCloudImporter::Config.load_from_settings(PointCloudImporter::Settings.instance)
       manager = PointCloudImporter::Manager.instance
