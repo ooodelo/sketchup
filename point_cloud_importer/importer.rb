@@ -348,24 +348,34 @@ module PointCloudImporter
       background_metric_logger = method(:log_metric)
       background_memory_fetcher = method(:capture_peak_memory_bytes)
 
-      Thread.new do
-        start_time = background_metrics_enabled ? Time.now : nil
-        begin
-          cloud.prepare_render_cache!
-          @manager.view&.invalidate
-        rescue StandardError
-          # Ignore background cache errors
-        ensure
-          if background_metrics_enabled && start_time
-            duration = Time.now - start_time
-            points_count = collection_length(cloud&.points)
-            background_metric_logger.call(
-              'background_index',
-              duration,
-              points: points_count,
-              peak_memory_bytes: background_memory_fetcher.call,
-              enabled: background_metrics_enabled
-            )
+      schedule_cache_preparation = if cloud.respond_to?(:mark_render_cache_preparation_pending!)
+                                     cloud.mark_render_cache_preparation_pending!
+                                   else
+                                     true
+                                   end
+
+      if schedule_cache_preparation
+        ::UI.start_timer(0, false) do
+          start_time = background_metrics_enabled ? Time.now : nil
+          begin
+            cloud.prepare_render_cache!
+            @manager.view&.invalidate
+          rescue StandardError
+            # Ignore background cache errors
+          ensure
+            cloud.clear_render_cache_preparation_pending! if cloud.respond_to?(:clear_render_cache_preparation_pending!)
+
+            if background_metrics_enabled && start_time
+              index_duration = Time.now - start_time
+              points_count = collection_length(cloud&.points)
+              background_metric_logger.call(
+                'background_index',
+                index_duration,
+                points: points_count,
+                peak_memory_bytes: background_memory_fetcher.call,
+                enabled: background_metrics_enabled
+              )
+            end
           end
         end
       end
