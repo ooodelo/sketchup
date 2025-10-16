@@ -160,6 +160,8 @@ module PointCloudImporter
       @lod_background_context = nil
       @lod_background_generation = 0
       @max_display_point_ramp = nil
+      @render_density_override = nil
+      @render_max_points_override = nil
       @intensity_min = nil
       @intensity_max = nil
       @random_seed = deterministic_seed_for(name)
@@ -226,6 +228,8 @@ module PointCloudImporter
       @lod_previous_level = nil
       @lod_transition_start = nil
       @render_cache_preparation_pending = false
+      @render_density_override = nil
+      @render_max_points_override = nil
     end
 
     def visible?
@@ -281,6 +285,38 @@ module PointCloudImporter
 
     def density
       @display_density
+    end
+
+    def apply_render_constraints!(density: nil, max_display_points: nil)
+      @render_density_override = density ? normalize_density(density) : @render_density_override
+      @render_max_points_override = max_display_points ? max_display_points.to_i : @render_max_points_override
+      self
+    end
+
+    def clear_render_constraints!
+      @render_density_override = nil
+      @render_max_points_override = nil
+      self
+    end
+
+    def render_density
+      override = @render_density_override
+      override ? normalize_density(override) : @display_density
+    end
+
+    def render_max_display_points
+      override = @render_max_points_override
+      override.nil? ? @max_display_points.to_i : override.to_i
+    end
+
+    def lod0_point_count
+      cache = @lod_caches ? @lod_caches[LOD_LEVELS.first] : nil
+      points = cache ? cache[:points] : nil
+      points ? points.length : 0
+    end
+
+    def background_build_pending?
+      !!@lod_background_build_pending
     end
 
     def color_mode=(mode)
@@ -414,6 +450,10 @@ module PointCloudImporter
       settings[:max_display_points] = @max_display_points
       invalidate_display_cache!
       refresh_inference_guides!
+    end
+
+    def max_display_points
+      @max_display_points
     end
 
     def prepare_render_cache!
@@ -2400,9 +2440,11 @@ module PointCloudImporter
     def filter_indices_for_density(indices)
       return [] if indices.nil?
       return indices if indices.empty?
-      return indices if @display_density >= 0.999
 
-      step = (1.0 / @display_density).round
+      current_density = render_density
+      return indices if current_density >= 0.999
+
+      step = (1.0 / current_density).round
       step = 1 if step < 1
       subsample_indices(indices, step)
     end
@@ -2423,26 +2465,32 @@ module PointCloudImporter
       base_cache = @lod_caches ? @lod_caches[LOD_LEVELS.first] : nil
       base_size = base_cache && base_cache[:points] ? base_cache[:points].length : 0
 
-      if @lod_background_build_pending
+      override_limit = @render_max_points_override
+
+      limit = if override_limit
+                override_limit.to_i
+              elsif @lod_background_build_pending
         requested_limit = @user_max_display_points.to_i
         requested_limit = @settings[:max_display_points].to_i if requested_limit <= 0
         requested_limit = DEFAULT_DISPLAY_POINT_CAP if requested_limit <= 0
 
-        return base_size if requested_limit <= 0
+                if base_size <= 0
+                  requested_limit
+                elsif requested_limit <= 0
+                  base_size
+                else
+                  [requested_limit, base_size].min
+                end
+              else
+                @max_display_points.to_i
+              end
 
-        return requested_limit if base_size <= 0
-
-        return [requested_limit, base_size].min
-      end
-
-      limit = @max_display_points.to_i
-
-      if limit.positive?
-        return limit if base_size <= 0
+      if base_size.positive?
+        return base_size if limit <= 0
 
         [limit, base_size].min
       else
-        base_size
+        limit
       end
     end
 

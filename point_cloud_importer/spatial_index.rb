@@ -37,7 +37,16 @@ module PointCloudImporter
       @root = load_from_cache(@cache_key) if @cache_key
 
       unless @root
-        data = points.each_with_index.map { |point, local_index| [point, indices[local_index]] }
+        data = []
+        points.each_with_index do |point, local_index|
+          entry_index = indices[local_index]
+          next if entry_index.nil?
+
+          converted = ensure_point3d(point)
+          next unless converted
+
+          data << [converted, entry_index]
+        end
         @root = build(data, max_depth: max_depth)
         persist_cache(@cache_key, @root) if @cache_key && @root
       end
@@ -413,6 +422,23 @@ module PointCloudImporter
 
     def squared_distance(a, b)
       (a.x - b.x)**2 + (a.y - b.y)**2 + (a.z - b.z)**2
+    end
+
+    def ensure_point3d(point)
+      return point if point.is_a?(Geom::Point3d)
+
+      if point.respond_to?(:x) && point.respond_to?(:y) && point.respond_to?(:z)
+        Geom::Point3d.new(point.x.to_f, point.y.to_f, point.z.to_f)
+      elsif point.respond_to?(:[])
+        x = point[0]
+        y = point[1]
+        z = point[2]
+        return nil if x.nil? || y.nil? || z.nil?
+
+        Geom::Point3d.new(x.to_f, y.to_f, z.to_f)
+      end
+    rescue StandardError
+      nil
     end
 
     def compute_cache_key(points, indices, max_depth)

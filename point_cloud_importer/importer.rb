@@ -18,6 +18,9 @@ module PointCloudImporter
     attr_reader :last_result
 
     VIEW_INVALIDATE_INTERVAL = 0.2
+    RENDER_CACHE_RETRY_INTERVAL = 0.1
+    RENDER_CACHE_MAX_ATTEMPTS = 10
+    RENDER_CACHE_TIMEOUT = 3.0
 
     def initialize(manager)
       @manager = manager
@@ -387,29 +390,12 @@ module PointCloudImporter
                                    end
 
       if schedule_cache_preparation
-        ::UI.start_timer(0, false) do
-          start_time = background_metrics_enabled ? Time.now : nil
-          begin
-            cloud.prepare_render_cache!
-            throttled_view_invalidate
-          rescue StandardError
-            # Ignore background cache errors
-          ensure
-            cloud.clear_render_cache_preparation_pending! if cloud.respond_to?(:clear_render_cache_preparation_pending!)
-
-            if background_metrics_enabled && start_time
-              index_duration = Time.now - start_time
-              points_count = collection_length(cloud&.points)
-              background_metric_logger.call(
-                'background_index',
-                index_duration,
-                points: points_count,
-                peak_memory_bytes: background_memory_fetcher.call,
-                enabled: background_metrics_enabled
-              )
-            end
-          end
-        end
+        schedule_render_cache_preparation(
+          cloud,
+          metrics_enabled: background_metrics_enabled,
+          metric_logger: background_metric_logger,
+          memory_fetcher: background_memory_fetcher
+        )
       end
 
       ::UI.messagebox(
@@ -441,6 +427,86 @@ module PointCloudImporter
       cloud.point_size = options[:point_size] if options[:point_size]
       cloud.point_style = options[:point_style] if options[:point_style]
       cloud.max_display_points = options[:max_display_points] if options[:max_display_points]
+    end
+
+    def schedule_render_cache_preparation(cloud, metrics_enabled:, metric_logger:, memory_fetcher:)
+      return unless cloud
+
+      attempts = 0
+      metrics_start = metrics_enabled ? Time.now : nil
+      start_monotonic = monotonic_time
+      timer_id = nil
+
+      finalize = lambda do |success|
+        cloud.clear_render_cache_preparation_pending! if cloud.respond_to?(:clear_render_cache_preparation_pending!)
+
+        if success && metrics_enabled && metrics_start
+          index_duration = Time.now - metrics_start
+          points_count = collection_length(cloud&.points)
+          metric_logger.call(
+            'background_index',
+            index_duration,
+            points: points_count,
+            peak_memory_bytes: memory_fetcher.call,
+            enabled: metrics_enabled
+          )
+        end
+      end
+
+      attempt = nil
+      attempt = lambda do
+        attempts += 1
+        success = false
+        begin
+          cloud.prepare_render_cache!
+          throttled_view_invalidate
+          success = true
+        rescue StandardError => error
+          Logger.debug do
+            "Не удалось подготовить рендер-кэш (попытка #{attempts}): #{error.message}"
+          end
+        end
+
+        elapsed = monotonic_time - start_monotonic
+
+        if success
+          finalize.call(true)
+          if timer_id
+            ::UI.stop_timer(timer_id)
+            timer_id = nil
+          end
+          true
+        elsif attempts >= RENDER_CACHE_MAX_ATTEMPTS || elapsed >= RENDER_CACHE_TIMEOUT
+          Logger.debug do
+            format(
+              'Подготовка рендер-кэша прервана после %<attempts>d попыток (%.2f с)',
+              attempts: attempts,
+              elapsed: elapsed
+            )
+          end
+          finalize.call(false)
+          if timer_id
+            ::UI.stop_timer(timer_id)
+            timer_id = nil
+          end
+          true
+        else
+          false
+        end
+      end
+
+      completed = attempt.call
+      return if completed
+
+      unless defined?(::UI) && ::UI.respond_to?(:start_timer)
+        Logger.debug('Таймеры UI недоступны, подготовка рендер-кэша остановлена досрочно')
+        finalize.call(false)
+        return
+      end
+
+      timer_id = ::UI.start_timer(RENDER_CACHE_RETRY_INTERVAL, repeat: true) do
+        attempt.call
+      end
     end
 
     def prompt_options
