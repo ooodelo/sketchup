@@ -24,7 +24,9 @@ module PointCloudImporter
       metrics_enabled: false,
       stress_reference_path: File.expand_path(File.join('..', 'docs', 'reference_cloud.ply'), __dir__),
       stress_log_path: nil,
-      stress_long_phase_threshold: 5.0
+      stress_long_phase_threshold: 5.0,
+      color_metrics_log_path: nil,
+      color_bench_log_path: nil
     }.freeze
 
     def chunk_size
@@ -122,6 +124,26 @@ module PointCloudImporter
       @stress_long_phase_threshold = normalize_float(value, DEFAULTS[:stress_long_phase_threshold])
     end
 
+    def color_metrics_log_path
+      return DEFAULTS[:color_metrics_log_path] unless instance_variable_defined?(:@color_metrics_log_path)
+
+      @color_metrics_log_path
+    end
+
+    def color_metrics_log_path=(value)
+      @color_metrics_log_path = value
+    end
+
+    def color_bench_log_path
+      return DEFAULTS[:color_bench_log_path] unless instance_variable_defined?(:@color_bench_log_path)
+
+      @color_bench_log_path
+    end
+
+    def color_bench_log_path=(value)
+      @color_bench_log_path = value
+    end
+
     def load_from_settings(settings = Settings.instance)
       self.chunk_size = settings[:import_chunk_size]
       self.invalidate_every_n_chunks = settings[:invalidate_every_n_chunks]
@@ -134,6 +156,8 @@ module PointCloudImporter
       self.stress_reference_path = settings[:stress_reference_path] if settings[:stress_reference_path]
       self.stress_log_path = settings[:stress_log_path] if settings[:stress_log_path]
       self.stress_long_phase_threshold = settings[:stress_long_phase_threshold] if settings[:stress_long_phase_threshold]
+      self.color_metrics_log_path = settings[:color_metrics_log_path] if settings[:color_metrics_log_path]
+      self.color_bench_log_path = settings[:color_bench_log_path] if settings[:color_bench_log_path]
       self
     end
 
@@ -161,6 +185,10 @@ module PointCloudImporter
         self.stress_log_path = value
       when :stress_long_phase_threshold
         self.stress_long_phase_threshold = value
+      when :color_metrics_log_path
+        self.color_metrics_log_path = value
+      when :color_bench_log_path
+        self.color_bench_log_path = value
       end
     end
 

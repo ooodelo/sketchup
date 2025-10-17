@@ -9,6 +9,7 @@ require_relative '../ui/manager_panel'
 require_relative '../ui/first_import_wizard'
 require_relative '../ui/measurement_history_dialog'
 require_relative '../stress_tester'
+require_relative '../color_bench'
 
 module PointCloudImporter
   module UI
@@ -88,6 +89,11 @@ module PointCloudImporter
         end
         @commands[:stress_test].tooltip = 'Запустить эталонный импорт с записью телеметрии'
 
+        @commands[:color_bench] = ::UI::Command.new('Color Bench') do
+          ColorBench.new(@manager).run
+        end
+        @commands[:color_bench].tooltip = 'Прогреть режимы окраски и записать телеметрию'
+
         @commands[:manage] = ::UI::Command.new('Менеджер облаков...') do
           UI::ManagerDialog.new(@manager).show
         end
@@ -119,6 +125,7 @@ module PointCloudImporter
         menu.add_item(@commands[:measurement_history])
         menu.add_separator
         menu.add_item(@commands[:stress_test])
+        menu.add_item(@commands[:color_bench])
       end
 
       def add_help_menu_items
