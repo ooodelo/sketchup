@@ -2545,8 +2545,8 @@ module PointCloudImporter
                     end
       Logger.debug do
         format(
-          'Построение октодерева: %.3fs, points=%<points>s, max_per_node=%<max>d, max_depth=%<depth>d',
-          duration,
+          'Построение октодерева: %<duration>.3fs, points=%<points>s, max_per_node=%<max>d, max_depth=%<depth>d',
+          duration: duration,
           points: point_count || 'n/a',
           max: octree.max_points_per_node,
           depth: octree.max_depth
