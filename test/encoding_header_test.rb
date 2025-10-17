@@ -9,10 +9,10 @@ class EncodingHeaderTest < Minitest::Test
     ruby_files.each do |path|
       next unless File.file?(path)
 
-      first_lines = File.readlines(path, encoding: 'UTF-8')[0, 2]
-      assert_includes first_lines, "# encoding: utf-8\n", "#{path} должен начинаться с '# encoding: utf-8'"
-      assert_includes first_lines, "# frozen_string_literal: true\n", "#{path} должен содержать директиву '# frozen_string_literal: true'"
-      assert first_lines.index("# encoding: utf-8\n") < first_lines.index("# frozen_string_literal: true\n"),
+      first_lines = File.readlines(path, encoding: 'UTF-8')[0, 2].map(&:chomp)
+      assert_includes first_lines, '# encoding: utf-8', "#{path} должен начинаться с '# encoding: utf-8'"
+      assert_includes first_lines, '# frozen_string_literal: true', "#{path} должен содержать директиву '# frozen_string_literal: true'"
+      assert first_lines.index('# encoding: utf-8') < first_lines.index('# frozen_string_literal: true'),
              "В файле #{path} строка '# encoding: utf-8' должна предшествовать '# frozen_string_literal: true'"
     end
   end
