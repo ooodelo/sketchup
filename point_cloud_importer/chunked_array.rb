@@ -89,7 +89,7 @@ module PointCloudImporter
       chunk = if @mutable_last_chunk && @last_len < @chunk_capacity && !@chunks.empty?
                 @chunks.last
               else
-                new_chunk = Array.new(@chunk_capacity)
+                new_chunk = []
                 @chunks << new_chunk
                 @last_len = 0
                 @mutable_last_chunk = true

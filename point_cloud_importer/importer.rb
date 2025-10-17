@@ -19,6 +19,7 @@ module PointCloudImporter
     attr_reader :last_result
 
     VIEW_INVALIDATE_INTERVAL = 0.2
+    ACCUMULATED_CHUNK_MAX_INTERVAL = 0.1
     RENDER_CACHE_RETRY_INTERVAL = 0.1
     RENDER_CACHE_MAX_ATTEMPTS = 10
     RENDER_CACHE_TIMEOUT = 3.0
@@ -117,11 +118,21 @@ module PointCloudImporter
           invalidate_every_n_chunks = if config
                                          config.sanitize_invalidate_every_n_chunks(invalidate_source)
                                        else
-                                         value = invalidate_source || default_invalidation
-                                         value = value.to_i
-                                         value = 1 if value < 1
-                                         value
-                                       end
+                                        value = invalidate_source || default_invalidation
+                                        value = value.to_i
+                                        value = 1 if value < 1
+                                        value
+                                      end
+
+          Logger.debug do
+            format(
+              'Импорт: chunk_size=%<chunk>d, binary_buffer=%<buffer>s, vertex_batch=%<batch>d, invalidate_every=%<invalidate>d',
+              chunk: chunk_size,
+              buffer: format_memory(buffer_size),
+              batch: batch_size_preference,
+              invalidate: invalidate_every_n_chunks
+            )
+          end
 
           message_queue << [
             :create_cloud,
@@ -129,26 +140,78 @@ module PointCloudImporter
               name: name,
               metadata: parser.metadata || {},
               invalidate_every_n_chunks: invalidate_every_n_chunks,
-              start_time: start_time
+              start_time: start_time,
+              chunk_size: chunk_size,
+              binary_buffer_size: buffer_size,
+              binary_vertex_batch_size: batch_size_preference
             }
           ]
 
           chunks_processed = 0
+          accumulated_points = nil
+          accumulated_colors = nil
+          accumulated_intensities = nil
+          accumulated_count = 0
+          accumulation_started_at = nil
+
+          flush_accumulated = lambda do
+            return unless accumulated_points && !accumulated_points.empty?
+
+            colors_payload = accumulated_colors
+            colors_payload = nil if colors_payload.is_a?(Array) && colors_payload.empty?
+            intensities_payload = accumulated_intensities
+            intensities_payload = nil if intensities_payload.is_a?(Array) && intensities_payload.empty?
+
+            message_queue << [
+              :append_chunk,
+              {
+                points: accumulated_points,
+                colors: colors_payload,
+                intensities: intensities_payload
+              }
+            ]
+
+            accumulated_points = nil
+            accumulated_colors = nil
+            accumulated_intensities = nil
+            accumulated_count = 0
+            accumulation_started_at = nil
+            chunks_processed += 1
+          end
           parsing_started_at = metrics_enabled_flag ? Time.now : nil
           metadata = parser.parse(chunk_size: chunk_size) do |points_chunk, colors_chunk, intensities_chunk, processed|
             break if job.cancel_requested? || job.finished?
             next unless points_chunk && !points_chunk.empty?
 
-          message_queue << [
-            :append_chunk,
-            {
-              points: points_chunk,
-              colors: colors_chunk,
-              intensities: intensities_chunk
-            }
-          ]
+          if accumulated_points
+            accumulated_points.concat(points_chunk)
+          else
+            accumulated_points = points_chunk
+            accumulation_started_at = monotonic_time
+          end
 
-          chunks_processed += 1
+          if colors_chunk && !colors_chunk.empty?
+            if accumulated_colors
+              accumulated_colors.concat(colors_chunk)
+            else
+              accumulated_colors = colors_chunk
+            end
+          end
+
+          if intensities_chunk && !intensities_chunk.empty?
+            if accumulated_intensities
+              accumulated_intensities.concat(intensities_chunk)
+            else
+              accumulated_intensities = intensities_chunk
+            end
+          end
+
+          accumulated_count += points_chunk.length
+
+          now = monotonic_time
+          if accumulated_count >= chunk_size || (accumulation_started_at && now - accumulation_started_at >= ACCUMULATED_CHUNK_MAX_INTERVAL)
+            flush_accumulated.call
+          end
 
           total_vertices = parser.total_vertex_count.to_i
           total_vertices = processed if total_vertices.zero? || total_vertices < processed
@@ -158,6 +221,8 @@ module PointCloudImporter
             message: format_progress_message(processed, total_vertices)
           )
           end
+
+          flush_accumulated.call
 
           parsing_finished_at = metrics_enabled_flag ? Time.now : nil
 
@@ -193,7 +258,12 @@ module PointCloudImporter
         cloud: nil,
         invalidate_every_n_chunks: 1,
         chunks_processed: 0,
-        start_time: nil
+        start_time: nil,
+        chunk_size: nil,
+        binary_buffer_size: nil,
+        binary_vertex_batch_size: nil,
+        last_invalidation_log_time: nil,
+        last_invalidation_chunk: 0
       }
 
       process_messages = lambda do |limit = nil|
@@ -224,6 +294,9 @@ module PointCloudImporter
             cloud_context[:cloud] = cloud
             cloud_context[:invalidate_every_n_chunks] = [payload[:invalidate_every_n_chunks].to_i, 1].max
             cloud_context[:start_time] = payload[:start_time]
+            cloud_context[:chunk_size] = payload[:chunk_size]
+            cloud_context[:binary_buffer_size] = payload[:binary_buffer_size]
+            cloud_context[:binary_vertex_batch_size] = payload[:binary_vertex_batch_size]
           when :append_chunk
             next if job.cancel_requested? || job.finished?
 
@@ -240,7 +313,8 @@ module PointCloudImporter
             cloud_context[:chunks_processed] += 1
             invalidate_every = cloud_context[:invalidate_every_n_chunks]
             if invalidate_every.positive? && (cloud_context[:chunks_processed] % invalidate_every).zero?
-              throttled_view_invalidate
+              invalidated = throttled_view_invalidate
+              log_invalidation_metrics(cloud_context) if invalidated
             end
           when :finalize_cloud
             next if job.finished?
@@ -258,13 +332,23 @@ module PointCloudImporter
             metadata = payload[:metadata] || {}
             cloud.update_metadata!(metadata)
 
-            if metrics_enabled_flag && payload[:parsing_started_at]
-              parsing_finished_at = payload[:parsing_finished_at] || Time.now
-              parsing_total_duration = parsing_finished_at - payload[:parsing_started_at]
-              parsing_duration = parsing_total_duration - metrics_state[:append_duration]
-              parsing_duration = 0.0 if parsing_duration.negative?
-              total_points = collection_length(cloud.points)
-              peak_memory_bytes = memory_fetcher.call
+            completion_time = Time.now
+            parsing_started_at = payload[:parsing_started_at]
+            parsing_finished_at = parsing_started_at ? (payload[:parsing_finished_at] || completion_time) : nil
+            parsing_total_duration = if parsing_started_at && parsing_finished_at
+                                       parsing_finished_at - parsing_started_at
+                                     end
+            append_duration = metrics_state[:append_duration]
+            parsing_duration = if parsing_total_duration && append_duration
+                                 parsing_total_duration - append_duration
+                               else
+                                 parsing_total_duration
+                               end
+            parsing_duration = 0.0 if parsing_duration && parsing_duration.negative?
+            total_points = collection_length(cloud.points)
+            peak_memory_bytes = memory_fetcher.call
+
+            if metrics_enabled_flag && parsing_started_at
               metric_logger.call(
                 'parsing',
                 parsing_duration,
@@ -274,7 +358,7 @@ module PointCloudImporter
               )
               metric_logger.call(
                 'append_points!',
-                metrics_state[:append_duration],
+                append_duration,
                 points: metrics_state[:append_points],
                 peak_memory_bytes: peak_memory_bytes,
                 enabled: metrics_enabled_flag
@@ -284,11 +368,24 @@ module PointCloudImporter
             total_vertices = payload[:total_vertices].to_i
             total_vertices = cloud.points.length if total_vertices.zero?
             start_time = cloud_context[:start_time]
+            total_duration = start_time ? completion_time - start_time : nil
             job.complete!(
               cloud: cloud,
               metadata: metadata,
-              duration: start_time ? Time.now - start_time : nil,
+              duration: total_duration,
               total_vertices: total_vertices
+            )
+
+            log_import_summary(
+              parse_duration: parsing_duration,
+              append_duration: append_duration,
+              total_duration: total_duration,
+              total_points: total_points,
+              peak_memory_bytes: peak_memory_bytes,
+              chunk_size: cloud_context[:chunk_size],
+              binary_buffer_size: cloud_context[:binary_buffer_size],
+              binary_vertex_batch_size: cloud_context[:binary_vertex_batch_size],
+              invalidate_every: cloud_context[:invalidate_every_n_chunks]
             )
           when :worker_finished
             worker_finished = true
@@ -341,7 +438,7 @@ module PointCloudImporter
 
     def throttled_view_invalidate
       view = @manager&.view
-      return unless view && view.respond_to?(:invalidate)
+      return false unless view && view.respond_to?(:invalidate)
 
       now = monotonic_time
       elapsed = now - @last_view_invalidation_at
@@ -354,13 +451,59 @@ module PointCloudImporter
             VIEW_INVALIDATE_INTERVAL
           )
         end
-        return
+        return false
       end
 
       view.invalidate
       @last_view_invalidation_at = now
+      true
     rescue StandardError => e
       Logger.debug { "Не удалось выполнить инвалидацию вида: #{e.class}: #{e.message}" }
+      false
+    end
+
+    def log_invalidation_metrics(context)
+      return unless context
+
+      now = monotonic_time
+      last_time = context[:last_invalidation_log_time] || context[:start_time] || now
+      elapsed = now - last_time
+      chunks_since_last = context[:chunks_processed] - context[:last_invalidation_chunk].to_i
+      invalidate_every = context[:invalidate_every_n_chunks]
+
+      invalidation_rate = elapsed.positive? ? (1.0 / elapsed) : 0.0
+      chunk_rate = elapsed.positive? ? (chunks_since_last.to_f / elapsed) : 0.0
+
+      Logger.debug do
+        format(
+          'Инвалидация вида: chunk=%<chunk>d, interval=%.3fs, invalidations_per_s=%.2f, chunk_rate=%.2f/с (каждые %<every>d чанков)',
+          chunk: context[:chunks_processed],
+          interval: elapsed,
+          invalidations_per_s: invalidation_rate,
+          chunk_rate: chunk_rate,
+          every: invalidate_every
+        )
+      end
+
+      context[:last_invalidation_log_time] = now
+      context[:last_invalidation_chunk] = context[:chunks_processed]
+    end
+
+    def log_import_summary(parse_duration:, append_duration:, total_duration:, total_points:, peak_memory_bytes:, chunk_size:,
+                           binary_buffer_size:, binary_vertex_batch_size:, invalidate_every:)
+      Logger.debug do
+        parts = ['Импорт завершен']
+        parts << "total=#{format_duration(total_duration)}" if total_duration
+        parts << "parse=#{format_duration(parse_duration)}" if parse_duration
+        parts << "append=#{format_duration(append_duration)}" if append_duration
+        parts << "points=#{format_point_count(total_points)}" if total_points && total_points.positive?
+        parts << "chunk_size=#{format_point_count(chunk_size)}" if chunk_size && chunk_size.positive?
+        parts << "buffer=#{format_memory(binary_buffer_size)}" if binary_buffer_size
+        parts << "vertex_batch=#{binary_vertex_batch_size}" if binary_vertex_batch_size
+        parts << "invalidate_every=#{invalidate_every}" if invalidate_every
+        parts << "peak_memory=#{format_memory(peak_memory_bytes)}" if peak_memory_bytes
+        parts.join(', ')
+      end
     end
 
     def finalize_completed_job(job)

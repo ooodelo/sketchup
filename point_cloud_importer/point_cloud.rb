@@ -9,6 +9,7 @@ require_relative 'spatial_index'
 require_relative 'octree'
 require_relative 'chunked_array'
 require_relative 'inference_sampler'
+require_relative 'logger'
 
 module PointCloudImporter
   # Data structure representing a point cloud and display preferences.
@@ -65,6 +66,7 @@ module PointCloudImporter
 
     DEFAULT_SINGLE_COLOR_HEX = '#ffffff'
     PACKED_COLOR_MASK = 0x00ffffff
+    DEFAULT_PACKED_COLOR = 0x00ffffff
 
     FRUSTUM_POSITION_QUANTUM = 0.1
     FRUSTUM_FOV_QUANTUM = 0.25
@@ -184,6 +186,7 @@ module PointCloudImporter
       @cache_dirty = false
       @render_cache_preparation_pending = false
       @manager_ref = nil
+      @packed_color_cache = {}
       append_points!(points, colors, intensities) if points && !points.empty?
 
       @inference_sample_indices = nil
@@ -238,6 +241,7 @@ module PointCloudImporter
       @render_cache_preparation_pending = false
       @render_density_override = nil
       @render_max_points_override = nil
+      @packed_color_cache = {}
     end
 
     def visible?
@@ -335,8 +339,7 @@ module PointCloudImporter
       @color_mode = normalized
       settings = Settings.instance
       settings[:color_mode] = @color_mode.to_s
-      invalidate_display_cache!
-      build_display_cache!
+      refresh_color_buffers!
     end
 
     def color_gradient=(gradient)
@@ -349,8 +352,7 @@ module PointCloudImporter
 
       return unless color_mode_requires_gradient?
 
-      invalidate_display_cache!
-      build_display_cache!
+      refresh_color_buffers!
     end
 
     def single_color=(value)
@@ -364,8 +366,7 @@ module PointCloudImporter
 
       return unless color_mode_requires_single_color?
 
-      invalidate_display_cache!
-      build_display_cache!
+      refresh_color_buffers!
     end
 
     def single_color
@@ -835,6 +836,8 @@ module PointCloudImporter
         @intensity_max = nil
       end
 
+      clear_color_cache!
+
       compute_bounds_efficient!(points_array)
       finalize_bounds!
       invalidate_display_cache!
@@ -844,18 +847,25 @@ module PointCloudImporter
     def append_points!(points_chunk, colors_chunk = nil, intensities_chunk = nil)
       return if points_chunk.nil? || points_chunk.empty?
 
-      points_chunk.each { |point| @points.append_direct!(point) }
+      @points.append_chunk(points_chunk)
+
       if colors_chunk && !colors_chunk.empty?
         @colors ||= ChunkedArray.new(@points.chunk_capacity)
-        colors_chunk.each do |color|
-          @colors.append_direct!(pack_color_value(color))
+        if colors_chunk.all? { |color| color.is_a?(Integer) }
+          @colors.append_chunk(colors_chunk)
+        else
+          normalized_colors = colors_chunk.map { |color| pack_color_value(color) }
+          @colors.append_chunk(normalized_colors)
         end
       end
+
       if intensities_chunk && !intensities_chunk.empty?
         @intensities ||= ChunkedArray.new(@points.chunk_capacity)
-        intensities_chunk.each { |intensity| @intensities.append_direct!(intensity) }
+        @intensities.append_chunk(intensities_chunk)
         update_intensity_range!(intensities_chunk)
       end
+
+      clear_color_cache!
 
       update_bounds_with_chunk(points_chunk)
 
@@ -1091,7 +1101,81 @@ module PointCloudImporter
       true
     end
 
+    def clear_color_cache!
+      @packed_color_cache = {}
+    end
+
+    def current_color_cache_key
+      gradient_key = color_mode_requires_gradient? ? @color_gradient : nil
+      single_color_key = color_mode_requires_single_color? ? color_to_hex(@single_color) : nil
+      intensity_key = @color_mode == :intensity ? [@intensity_min, @intensity_max] : nil
+      bounds_key = if %i[height rgb_xyz].include?(@color_mode)
+                     [@bounds_min_x, @bounds_min_y, @bounds_min_z,
+                      @bounds_max_x, @bounds_max_y, @bounds_max_z]
+                   end
+
+      [@color_mode, gradient_key, single_color_key, intensity_key, bounds_key]
+    end
+
+    def packed_color_cache_for_current_mode
+      return nil unless color_buffer_enabled?
+
+      total = @points ? @points.length : 0
+      return [] if total <= 0
+
+      key = current_color_cache_key
+      cache = (@packed_color_cache ||= {})
+      buffer = cache[key]
+      return buffer if buffer && buffer.length == total
+
+      buffer = Array.new(total) { |index| packed_display_color_for_index(index) }
+      cache[key] = buffer
+    rescue StandardError
+      cache.delete(key) if cache && key
+      nil
+    end
+
+    def packed_display_color_for_index(index)
+      case @color_mode
+      when :original
+        value = @colors ? @colors[index] : nil
+        value = pack_color_value(value) unless value.is_a?(Integer)
+        value.nil? ? DEFAULT_PACKED_COLOR : (value & PACKED_COLOR_MASK)
+      when :height
+        point = @points[index]
+        point ? packed_gradient_color(normalize_height(point)) : DEFAULT_PACKED_COLOR
+      when :intensity
+        intensity = intensity_at(index)
+        if !intensity.nil?
+          packed_gradient_color(normalize_intensity(intensity))
+        else
+          point = @points[index]
+          point ? packed_gradient_color(normalize_height(point)) : DEFAULT_PACKED_COLOR
+        end
+      when :single
+        pack_color_value(@single_color) || DEFAULT_PACKED_COLOR
+      when :random
+        packed_random_color(index)
+      when :rgb_xyz
+        point = @points[index]
+        point ? packed_rgb_from_xyz(point) : DEFAULT_PACKED_COLOR
+      else
+        value = @colors ? @colors[index] : nil
+        value = pack_color_value(value) unless value.is_a?(Integer)
+        value.nil? ? DEFAULT_PACKED_COLOR : (value & PACKED_COLOR_MASK)
+      end
+    rescue StandardError
+      DEFAULT_PACKED_COLOR
+    end
+
     def display_color_for_index(original_index)
+      return nil if original_index.nil?
+
+      buffer = packed_color_cache_for_current_mode
+      if buffer && original_index < buffer.length
+        return color_from_storage(buffer[original_index])
+      end
+
       case @color_mode
       when :original
         original_color_at(original_index)
@@ -1128,8 +1212,13 @@ module PointCloudImporter
     end
 
     def gradient_color(value)
+      components = gradient_components(value)
+      Sketchup::Color.new(components[0], components[1], components[2])
+    end
+
+    def gradient_components(value)
       stops = COLOR_GRADIENTS[@color_gradient] || COLOR_GRADIENTS[:viridis]
-      return Sketchup::Color.new(*stops.last[1]) unless stops && !stops.empty?
+      return stops && !stops.empty? ? stops.last[1].dup : [255, 255, 255]
 
       t = clamp01(value.to_f)
       lower = stops.first
@@ -1143,17 +1232,19 @@ module PointCloudImporter
         lower = stop
       end
 
-      if upper == lower
-        components = lower[1]
-        return Sketchup::Color.new(components[0], components[1], components[2])
-      end
+      return lower[1].dup if upper == lower
 
       range = upper[0] - lower[0]
       weight = range.abs < Float::EPSILON ? 0.0 : (t - lower[0]) / range
-      interpolated = lower[1].zip(upper[1]).map do |min_component, max_component|
+      lower[1].zip(upper[1]).map do |min_component, max_component|
         (min_component + (max_component - min_component) * weight).round.clamp(0, 255)
       end
-      Sketchup::Color.new(interpolated[0], interpolated[1], interpolated[2])
+    end
+
+    def packed_gradient_color(value)
+      pack_color_components(gradient_components(value)) || DEFAULT_PACKED_COLOR
+    rescue StandardError
+      DEFAULT_PACKED_COLOR
     end
 
     def clamp01(value)
@@ -1243,13 +1334,17 @@ module PointCloudImporter
     end
 
     def random_color_for_index(index)
+      color_from_storage(packed_random_color(index))
+    end
+
+    def packed_random_color(index)
       seed = (@random_seed + index.to_i * 1_103_515_245 + 12_345) & 0xffffffff
       r = (((seed >> 16) & 0xff) / 2.0 + 64).round.clamp(0, 255)
       g = (((seed >> 8) & 0xff) / 2.0 + 64).round.clamp(0, 255)
       b = ((seed & 0xff) / 2.0 + 64).round.clamp(0, 255)
-      Sketchup::Color.new(r, g, b)
+      pack_color_components([r, g, b]) || DEFAULT_PACKED_COLOR
     rescue StandardError
-      Sketchup::Color.new(255, 255, 255)
+      DEFAULT_PACKED_COLOR
     end
 
     def intensity_at(index)
@@ -1292,11 +1387,15 @@ module PointCloudImporter
     end
 
     def rgb_from_xyz(point)
+      color_from_storage(packed_rgb_from_xyz(point))
+    end
+
+    def packed_rgb_from_xyz(point)
       bbox = bounding_box
-      return Sketchup::Color.new(255, 255, 255) unless bbox
+      return DEFAULT_PACKED_COLOR unless bbox
 
       coords = point_coordinates(point)
-      return Sketchup::Color.new(255, 255, 255) unless coords
+      return DEFAULT_PACKED_COLOR unless coords
 
       min = bbox.min
       max = bbox.max
@@ -1305,11 +1404,13 @@ module PointCloudImporter
       y = normalize_component(coords[1], min.y, max.y)
       z = normalize_component(coords[2], min.z, max.z)
 
-      Sketchup::Color.new((x * 255).round.clamp(0, 255),
-                          (y * 255).round.clamp(0, 255),
-                          (z * 255).round.clamp(0, 255))
+      pack_color_components([
+        (x * 255).round.clamp(0, 255),
+        (y * 255).round.clamp(0, 255),
+        (z * 255).round.clamp(0, 255)
+      ]) || DEFAULT_PACKED_COLOR
     rescue StandardError
-      Sketchup::Color.new(255, 255, 255)
+      DEFAULT_PACKED_COLOR
     end
 
     def normalize_component(value, minimum, maximum)
@@ -1417,6 +1518,33 @@ module PointCloudImporter
       end
     end
 
+    def refresh_color_buffers!
+      return build_display_cache! if @cache_dirty || @lod_caches.nil?
+      return unless points && !points.empty?
+
+      base_cache = @lod_caches[LOD_LEVELS.first]
+      unless base_cache && base_cache[:point_indices]
+        build_display_cache!
+        return
+      end
+
+      packed_colors = packed_color_cache_for_current_mode
+
+      @lod_caches.each_value do |cache|
+        next unless cache
+
+        if packed_colors && !packed_colors.empty?
+          cache[:colors] = cache[:point_indices].map do |original_index|
+            color_from_storage(packed_colors[original_index])
+          end
+        else
+          cache[:colors] = nil
+        end
+      end
+
+      assign_primary_cache(@lod_caches[@lod_current_level || LOD_LEVELS.first])
+    end
+
     def build_base_cache(limit:)
       return nil unless points && !points.empty?
 
@@ -1428,13 +1556,20 @@ module PointCloudImporter
       base_colors = color_buffer_enabled? ? [] : nil
       base_index_lookup = {}
       base_point_indices = []
+      packed_colors = base_colors ? packed_color_cache_for_current_mode : nil
 
       (0...points.length).step(step) do |index|
         point = point3d_from(points[index])
         next unless point
 
         base_points << point
-        base_colors << display_color_for_index(index) if base_colors
+        if base_colors
+          if packed_colors && index < packed_colors.length
+            base_colors << color_from_storage(packed_colors[index])
+          else
+            base_colors << display_color_for_index(index)
+          end
+        end
         base_index_lookup[index] = base_points.length - 1
         base_point_indices << index
         break if limit.positive? && base_points.length >= limit
@@ -2398,7 +2533,25 @@ module PointCloudImporter
     def build_octree_if_needed(octree)
       return unless octree
 
-      octree.build unless octree.built?
+      return octree if octree.built?
+
+      start_time = Time.now
+      octree.build
+      duration = Time.now - start_time
+      point_count = if octree.points.respond_to?(:length)
+                      octree.points.length
+                    else
+                      nil
+                    end
+      Logger.debug do
+        format(
+          'Построение октодерева: %.3fs, points=%<points>s, max_per_node=%<max>d, max_depth=%<depth>d',
+          duration,
+          points: point_count || 'n/a',
+          max: octree.max_points_per_node,
+          depth: octree.max_depth
+        )
+      end
       octree
     end
 

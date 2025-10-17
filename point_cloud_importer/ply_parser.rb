@@ -260,6 +260,11 @@ module PointCloudImporter
       color_indices = color_property_indices(property_index_by_name)
       intensity_index = intensity_property_index(property_index_by_name)
 
+      x_index = property_index_by_name['x']
+      y_index = property_index_by_name['y']
+      z_index = property_index_by_name['z']
+      r_index, g_index, b_index = color_indices if color_indices
+
       stride = properties.sum { |property| bytesize(property[:type]) }
       chunk_size = [chunk_size.to_i, 1].max
 
@@ -299,17 +304,20 @@ module PointCloudImporter
 
         batch_size.times do |index|
           base_offset = index * property_count
-          point, color, intensity = interpret_vertex(
-            flat_values,
-            property_index_by_name,
-            color_indices,
-            intensity_index,
-            base_offset: base_offset
-          )
 
-          points_chunk << point
-          colors_chunk << color if colors_chunk
-          intensities_chunk << intensity if intensities_chunk
+          x = flat_values[base_offset + x_index].to_f
+          y = flat_values[base_offset + y_index].to_f
+          z = flat_values[base_offset + z_index].to_f
+          points_chunk << [x, y, z]
+
+          if colors_chunk
+            r = flat_values[base_offset + r_index].to_i & 0xff
+            g = flat_values[base_offset + g_index].to_i & 0xff
+            b = flat_values[base_offset + b_index].to_i & 0xff
+            colors_chunk << ((r << 16) | (g << 8) | b)
+          end
+
+          intensities_chunk << flat_values[base_offset + intensity_index] if intensities_chunk
 
           processed += 1
 

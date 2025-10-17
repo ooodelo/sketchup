@@ -182,6 +182,7 @@ module PointCloudImporter
     def subdivide(node)
       stack = []
       stack << node if node
+      buckets = Array.new(8) { [] }
 
       until stack.empty?
         current = stack.pop
@@ -192,10 +193,10 @@ module PointCloudImporter
 
         bounds = current.bounding_box
         center = bounds.center
-        buckets = Array.new(8) { [] }
+        buckets.each(&:clear)
 
         current.point_indices.each do |index|
-          point = point_for_index(index)
+          point = @points && @points[index]
           next unless point
 
           bucket_index = octant_index(point, center)
@@ -208,7 +209,9 @@ module PointCloudImporter
           next if bucket.empty?
 
           child_bounds = bounds_for_octant(bounds, center, bucket_index)
-          child = OctreeNode.new(bounding_box: child_bounds, point_indices: bucket, depth: current.depth + 1)
+          child_indices = bucket.dup
+          bucket.clear
+          child = OctreeNode.new(bounding_box: child_bounds, point_indices: child_indices, depth: current.depth + 1)
           current.set_child(bucket_index, child)
           stack << child
         end
