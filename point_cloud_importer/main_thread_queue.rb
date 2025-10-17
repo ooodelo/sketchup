@@ -8,98 +8,243 @@ require_relative 'logger'
 require_relative 'threading'
 
 module PointCloudImporter
-  # Dispatch queue that ensures SketchUp API interactions are executed from the
-  # main thread. Background threads enqueue blocks which are executed during
-  # timer ticks to keep the UI responsive.
-  class MainThreadQueue
+  # Cooperative scheduler that executes short tasks on the SketchUp main
+  # thread. All UI facing background work should be funneled through this
+  # singleton to avoid spawning multiple timers that compete for time slices.
+  class MainThreadScheduler
     include Singleton
 
-    MAX_MESSAGES_PER_TICK = 100
-    MAX_TICK_DURATION = 0.008
+    DEFAULT_TICK_BUDGET = 0.007
+    MAX_TASKS_PER_TICK = 128
+    TIMER_INTERVAL = 0.0
 
-    def initialize
-      @queue = Queue.new
-      @timer_mutex = Mutex.new
-      @timer_id = nil
-      ensure_timer
+    TaskHandle = Struct.new(:scheduler, :id) do
+      def cancel
+        scheduler&.cancel(id)
+      end
+
+      def alive?
+        scheduler ? scheduler.alive?(id) : false
+      end
     end
 
-    def enqueue(&block)
+    TaskContext = Struct.new(:deadline, :handle, :scheduler) do
+      attr_accessor :reschedule_in
+
+      def remaining_budget
+        return Float::INFINITY unless deadline
+
+        [deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC), 0.0].max
+      rescue StandardError
+        0.0
+      end
+    end
+
+    def initialize
+      @mutex = Mutex.new
+      @tasks = []
+      @task_lookup = {}
+      @next_id = 1
+      @timer_id = nil
+      @tasks_sorted = true
+    end
+
+    def schedule(name:, priority: 0, delay: 0.0, quota: DEFAULT_TICK_BUDGET, cancel_if: nil, &block)
       raise ArgumentError, 'block required' unless block
 
-      @queue << block
-      ensure_timer
+      task = nil
+
+      @mutex.synchronize do
+        id = @next_id
+        @next_id += 1
+        run_at = monotonic_time + [delay.to_f, 0.0].max
+        task = {
+          id: id,
+          name: name.to_s,
+          block: block,
+          priority: priority.to_i,
+          run_at: run_at,
+          quota: quota.to_f.positive? ? quota.to_f : DEFAULT_TICK_BUDGET,
+          cancel_if: cancel_if,
+          cancelled: false
+        }
+
+        @tasks << task
+        @task_lookup[id] = task
+        @tasks_sorted = false
+        ensure_timer_locked
+      end
+
+      TaskHandle.new(self, task[:id])
+    end
+
+    def cancel(id)
+      @mutex.synchronize do
+        task = @task_lookup.delete(id)
+        task[:cancelled] = true if task
+      end
+    end
+
+    def alive?(id)
+      @mutex.synchronize do
+        task = @task_lookup[id]
+        task && !task[:cancelled]
+      end
     end
 
     def process_tick
-      Threading.guard(:ui, message: 'MainThreadQueue#process_tick')
-      start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      Threading.guard(:ui, message: 'MainThreadScheduler#process_tick')
+
+      tick_start = monotonic_time
+      tick_deadline = tick_start + DEFAULT_TICK_BUDGET
       processed = 0
 
       loop do
-        break if processed >= MAX_MESSAGES_PER_TICK
-        break if exceeded_budget?(start)
+        break if processed >= MAX_TASKS_PER_TICK
 
-        block = pop_nonblocking
-        break unless block
+        task = next_ready_task
+        break unless task
+
+        break if monotonic_time >= tick_deadline
+
+        handle = TaskHandle.new(self, task[:id])
+        quota_deadline = [tick_deadline, monotonic_time + task[:quota]].min
+        context = TaskContext.new(quota_deadline, handle, self)
 
         begin
-          block.call
+          result = execute_task(task, context)
         rescue StandardError => e
           Logger.debug do
-            "MainThreadQueue handler failed: #{e.class}: #{e.message}\n#{Array(e.backtrace).join("\n")}"
+            "MainThreadScheduler task '#{task[:name]}' failed: #{e.class}: #{e.message}\n" \
+              "#{Array(e.backtrace).join("\n")}"
           end
-        ensure
-          processed += 1
+          result = :done
+        end
+
+        processed += 1
+
+        case result
+        when :pending
+          reschedule_task(task, context.reschedule_in || 0.0)
+        when :reschedule
+          reschedule_task(task, context.reschedule_in || DEFAULT_TICK_BUDGET)
+        else
+          finalize_task(task)
         end
       end
     ensure
       maybe_stop_timer
     end
 
+    def enqueue(&block)
+      schedule(name: 'dispatch', priority: 1000, &block)
+    end
+
     private
 
-    def exceeded_budget?(start)
-      (Process.clock_gettime(Process::CLOCK_MONOTONIC) - start) >= MAX_TICK_DURATION
-    rescue StandardError
-      false
+    def execute_task(task, context)
+      return :done unless task
+      return :done if task[:cancelled]
+
+      predicate = task[:cancel_if]
+      if predicate
+        begin
+          return :done if predicate.call == true
+        rescue StandardError => e
+          Logger.debug { "MainThreadScheduler cancel predicate failed: #{e.message}" }
+        end
+      end
+
+      task[:block].call(context)
     end
 
-    def pop_nonblocking
-      @queue.pop(true)
-    rescue ThreadError
-      nil
+    def reschedule_task(task, delay)
+      @mutex.synchronize do
+        return if task[:cancelled]
+
+        task[:run_at] = monotonic_time + [delay.to_f, 0.0].max
+        @tasks << task
+        @task_lookup[task[:id]] = task
+        @tasks_sorted = false
+      end
     end
 
-    def ensure_timer
+    def finalize_task(task)
+      @mutex.synchronize do
+        task[:cancelled] = true
+        @task_lookup.delete(task[:id])
+      end
+    end
+
+    def next_ready_task
+      @mutex.synchronize do
+        cleanup_cancelled_locked
+        return nil if @tasks.empty?
+
+        sort_tasks_locked unless @tasks_sorted
+
+        now = monotonic_time
+        return nil if @tasks.empty?
+        return nil if @tasks.first[:run_at] > now
+
+        task = @tasks.shift
+        task
+      end
+    end
+
+    def sort_tasks_locked
+      @tasks.sort_by! { |task| [task[:run_at], -task[:priority]] }
+      @tasks_sorted = true
+    end
+
+    def cleanup_cancelled_locked
+      return if @tasks.empty?
+
+      @tasks.reject! do |task|
+        if task[:cancelled]
+          @task_lookup.delete(task[:id])
+          true
+        else
+          false
+        end
+      end
+    end
+
+    def ensure_timer_locked
       return unless defined?(::UI)
 
-      @timer_mutex.synchronize do
-        return if @timer_id
+      return if @timer_id
 
-        begin
-          @timer_id = ::UI.start_timer(0.0, repeat: true) { process_tick }
-        rescue StandardError => e
-          Logger.debug { "Failed to start main thread queue timer: #{e.class}: #{e.message}" }
-          @timer_id = nil
-        end
+      begin
+        @timer_id = ::UI.start_timer(TIMER_INTERVAL, repeat: true) { process_tick }
+      rescue StandardError => e
+        Logger.debug { "Failed to start scheduler timer: #{e.class}: #{e.message}" }
+        @timer_id = nil
       end
     end
 
     def maybe_stop_timer
-      return unless @queue.empty?
+      return unless defined?(::UI)
 
-      @timer_mutex.synchronize do
-        return unless @timer_id && @queue.empty?
-
-        begin
-          ::UI.stop_timer(@timer_id)
-        rescue StandardError => e
-          Logger.debug { "Failed to stop main thread queue timer: #{e.class}: #{e.message}" }
-        ensure
+      @mutex.synchronize do
+        if @tasks.empty? && @timer_id
+          begin
+            ::UI.stop_timer(@timer_id)
+          rescue StandardError => e
+            Logger.debug { "Failed to stop scheduler timer: #{e.class}: #{e.message}" }
+          ensure
+            @timer_id = nil
+          end
+        elsif @tasks.empty?
           @timer_id = nil
         end
       end
+    end
+
+    def monotonic_time
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    rescue StandardError
+      Time.now.to_f
     end
   end
 
@@ -107,7 +252,7 @@ module PointCloudImporter
     module_function
 
     def enqueue(&block)
-      MainThreadQueue.instance.enqueue(&block)
+      MainThreadScheduler.instance.enqueue(&block)
     end
   end
 end
