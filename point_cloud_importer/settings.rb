@@ -44,7 +44,10 @@ module PointCloudImporter
       import_preset: :balanced,
       stress_reference_path: File.expand_path(File.join('..', 'docs', 'reference_cloud.ply'), __dir__),
       stress_log_path: nil,
-      stress_long_phase_threshold: 5.0
+      stress_long_phase_threshold: 5.0,
+      color_economy_threshold: 750_000,
+      color_metrics_log_path: nil,
+      color_bench_log_path: nil
     }.freeze
 
     IMPORT_PRESETS = {
@@ -59,7 +62,8 @@ module PointCloudImporter
         sampling_target: 250_000,
         max_points_sampled: 50_000,
         octree_max_points_per_node: 80_000,
-        octree_max_depth: 7
+        octree_max_depth: 7,
+        color_economy_threshold: 500_000
       }.freeze,
       balanced: {
         import_chunk_size: 1_000_000,
@@ -72,7 +76,8 @@ module PointCloudImporter
         sampling_target: 500_000,
         max_points_sampled: 100_000,
         octree_max_points_per_node: 50_000,
-        octree_max_depth: 8
+        octree_max_depth: 8,
+        color_economy_threshold: 750_000
       }.freeze,
       quality: {
         import_chunk_size: 1_600_000,
@@ -85,7 +90,8 @@ module PointCloudImporter
         sampling_target: 750_000,
         max_points_sampled: 200_000,
         octree_max_points_per_node: 35_000,
-        octree_max_depth: 9
+        octree_max_depth: 9,
+        color_economy_threshold: 1_100_000
       }.freeze
     }.freeze
 
@@ -182,7 +188,8 @@ module PointCloudImporter
         value.to_s
       when :import_chunk_size, :invalidate_every_n_chunks, :yield_interval, :binary_buffer_size,
            :binary_vertex_batch_size, :startup_cap, :invalidate_interval_ms, :batch_vertices_limit,
-           :chunk_capacity, :max_points_sampled, :octree_max_points_per_node, :octree_max_depth
+           :chunk_capacity, :max_points_sampled, :octree_max_points_per_node, :octree_max_depth,
+           :color_economy_threshold
         value.to_i
       when :dialog_width, :dialog_height, :panel_width, :panel_height, :point_size, :max_display_points
         value.to_i
@@ -199,6 +206,8 @@ module PointCloudImporter
       when :stress_long_phase_threshold
         candidate = value.respond_to?(:to_f) ? value.to_f : Float(value)
         candidate.positive? ? candidate : DEFAULTS[:stress_long_phase_threshold]
+      when :color_metrics_log_path, :color_bench_log_path
+        value.nil? ? nil : value.to_s
       else
         value
       end

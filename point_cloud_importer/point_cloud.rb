@@ -13,6 +13,7 @@ require_relative 'logger'
 require_relative 'threading'
 require_relative 'main_thread_queue'
 require_relative 'progress_estimator'
+require_relative 'telemetry_logger'
 
 module PointCloudImporter
   # Data structure representing a point cloud and display preferences.
@@ -81,6 +82,7 @@ module PointCloudImporter
     COLOR_DEBOUNCE_INTERVAL = 0.15
     COLOR_REBUILD_BATCH = 100_000
     COLOR_REBUILD_INITIAL_BATCH = 75_000
+    HEAVY_COLOR_MODES = %i[rgb_xyz].freeze
     GRADIENT_LUT_SIZE = 256
 
     FRUSTUM_POSITION_QUANTUM = 0.1
@@ -228,6 +230,7 @@ module PointCloudImporter
       @random_color_cache_generation = nil
       @color_progress_estimator = ProgressEstimator.new
       @color_metrics = nil
+      @last_color_rebuild_summary = nil
       @last_visible_point_count = 0
       @last_sampling_duration = nil
       append_points!(points, colors, intensities) if points && !points.empty?
@@ -374,6 +377,16 @@ module PointCloudImporter
     def render_max_display_points
       override = @render_max_points_override
       override.nil? ? @max_display_points.to_i : override.to_i
+    end
+
+    def color_rebuild_pending?
+      !!@color_rebuild_pending
+    end
+
+    def consume_last_color_rebuild_summary
+      summary = @last_color_rebuild_summary
+      @last_color_rebuild_summary = nil
+      summary
     end
 
     def current_lod_level
@@ -1504,6 +1517,21 @@ module PointCloudImporter
       definition ? !!definition[:single_color] : false
     end
 
+    def heavy_color_mode?(mode = @color_mode)
+      HEAVY_COLOR_MODES.include?(mode)
+    end
+
+    def color_economy_threshold
+      value = @settings[:color_economy_threshold]
+      value = value.to_i
+      return value if value.positive?
+
+      fallback = Settings::DEFAULTS[:color_economy_threshold]
+      fallback ? fallback.to_i : 0
+    rescue StandardError
+      Settings::DEFAULTS[:color_economy_threshold]
+    end
+
     def deterministic_seed_for(value)
       seed = 0x811c9dc5
       value.to_s.each_byte do |byte|
@@ -1852,7 +1880,7 @@ module PointCloudImporter
       @lod_background_suspension = nil
     end
 
-    def initialize_color_rebuild_metrics(total:, primary_total:, generation:)
+    def initialize_color_rebuild_metrics(total:, primary_total:, generation:, economy:, color_mode:)
       estimator = (@color_progress_estimator ||= ProgressEstimator.new)
       estimator.reset(total_vertices: total)
       @color_metrics = {
@@ -1864,7 +1892,9 @@ module PointCloudImporter
         primary_processed: 0,
         primary_completed_at: nil,
         peak_memory: current_memory_usage,
-        last_rate: nil
+        last_rate: nil,
+        economy: economy ? economy.dup : nil,
+        color_mode: color_mode
       }
     end
 
@@ -1873,6 +1903,8 @@ module PointCloudImporter
       return unless metrics
 
       metrics[:processed] = state[:processed]
+      state_economy = state[:economy]
+      metrics[:economy] ||= state_economy ? state_economy.dup : nil
 
       if primary_in_batch.positive?
         metrics[:primary_processed] = state[:primary_processed]
@@ -1990,12 +2022,14 @@ module PointCloudImporter
       metrics[:processed] = metrics[:processed].to_i
       metrics[:finished_at] = finished_at
 
-      log_color_rebuild_metrics(metrics, success)
+      summary = compile_color_rebuild_summary(metrics, success)
+      emit_color_rebuild_logs(summary)
+      @last_color_rebuild_summary = summary
 
       @color_metrics = nil
     end
 
-    def log_color_rebuild_metrics(metrics, success)
+    def compile_color_rebuild_summary(metrics, success)
       started_at = metrics[:started_at] || metrics[:finished_at]
       finished_at = metrics[:finished_at] || safe_monotonic_time
       total_duration = finished_at - started_at
@@ -2015,21 +2049,104 @@ module PointCloudImporter
                0.0
              end
 
-      Logger.debug do
-        format('color_rebuild;%<cloud>s;%<generation>d;%<success>s;%<processed>d;%<total>d;%<primary_total>d;%<duration>.3f;%<primary_duration>.3f;%<rate>.1f;%<peak_memory>d',
-               cloud: name.to_s,
-               generation: metrics[:generation].to_i,
-               success: success ? 1 : 0,
-               processed: processed,
-               total: total,
-               primary_total: metrics[:primary_total].to_i,
-               duration: total_duration || 0.0,
-               primary_duration: primary_duration || 0.0,
-               rate: rate,
-               peak_memory: metrics[:peak_memory].to_i)
-      end
+      {
+        cloud: name.to_s,
+        generation: metrics[:generation].to_i,
+        success: !!success,
+        processed: processed,
+        total: total,
+        primary_total: metrics[:primary_total].to_i,
+        duration: total_duration || 0.0,
+        primary_duration: primary_duration || 0.0,
+        rate: rate,
+        peak_memory: metrics[:peak_memory].to_i,
+        color_mode: metrics[:color_mode],
+        economy: metrics[:economy]
+      }
     rescue StandardError
       nil
+    end
+
+    def emit_color_rebuild_logs(summary)
+      return unless summary
+
+      Logger.debug do
+        format('color_rebuild;%<cloud>s;%<generation>d;%<success>s;%<processed>d;%<total>d;%<primary_total>d;%<duration>.3f;%<primary_duration>.3f;%<rate>.1f;%<peak_memory>d;%<economy>s',
+               cloud: summary[:cloud],
+               generation: summary[:generation],
+               success: summary[:success] ? 1 : 0,
+               processed: summary[:processed],
+               total: summary[:total],
+               primary_total: summary[:primary_total],
+               duration: summary[:duration] || 0.0,
+               primary_duration: summary[:primary_duration] || 0.0,
+               rate: summary[:rate] || 0.0,
+               peak_memory: summary[:peak_memory],
+               economy: summary.dig(:economy, :enabled) ? 'economy' : 'full')
+      end
+
+      TelemetryLogger.instance.log_color_rebuild(summary)
+    rescue StandardError => e
+      Logger.debug { "Color rebuild telemetry failed: #{e.message}" }
+    end
+
+    def compute_color_economy(total_points:, visible_points:, color_mode:)
+      threshold = color_economy_threshold.to_i
+      visible = visible_points.to_i
+      total = total_points.to_i
+
+      enabled = heavy_color_mode?(color_mode) && threshold.positive? && total > threshold && visible > threshold
+      limit = enabled ? [threshold, visible].min : visible
+      limit = visible if limit <= 0
+      step = visible.positive? ? (visible.to_f / [limit, 1].max).ceil : 1
+      step = 1 if step <= 0
+
+      {
+        enabled: enabled,
+        threshold: threshold,
+        visible: visible,
+        limit: limit,
+        step: step
+      }
+    rescue StandardError
+      {
+        enabled: false,
+        threshold: color_economy_threshold.to_i,
+        visible: visible_points.to_i,
+        limit: visible_points.to_i,
+        step: 1
+      }
+    end
+
+    def downsample_primary_indices(indices, economy)
+      return [] unless indices
+
+      collection = indices.dup
+      return collection unless economy && economy[:enabled]
+
+      visible = collection.length
+      limit = economy[:limit].to_i
+      limit = visible if limit <= 0 || limit > visible
+      return collection if limit >= visible || limit <= 0
+
+      stride = economy[:step].to_i
+      stride = (visible.to_f / limit).ceil if stride <= 0
+      stride = 1 if stride <= 0
+
+      sampled = []
+      collection.each_with_index do |index, position|
+        next unless (position % stride).zero?
+
+        sampled << index
+        break if sampled.length >= limit
+      end
+
+      sampled = collection.first(limit) if sampled.empty?
+      economy[:step] = stride
+      economy[:limit] = limit
+      sampled
+    rescue StandardError
+      indices ? indices.dup : []
     end
 
     def build_base_cache(limit:)
@@ -2095,13 +2212,19 @@ module PointCloudImporter
       return nil if total <= 0
 
       base_cache = current_lod_cache || @lod_caches&.fetch(LOD_LEVELS.first, nil)
-      primary_indices = base_cache ? Array(base_cache[:point_indices]) : []
-      primary_enum = primary_indices.empty? ? nil : primary_indices.each
+      primary_candidates = base_cache ? Array(base_cache[:point_indices]) : []
+      economy = compute_color_economy(total_points: total,
+                                      visible_points: primary_candidates.length,
+                                      color_mode: @color_mode)
+
+      sampled_primary = downsample_primary_indices(primary_candidates, economy)
+      primary_enum = sampled_primary.empty? ? nil : sampled_primary.each
 
       primary_lookup = {}
-      primary_indices.each { |index| primary_lookup[index] = true }
+      sampled_primary.each { |index| primary_lookup[index] = true }
 
-      primary_total = primary_indices.length
+      primary_total = sampled_primary.length
+      economy[:primary_total] = primary_total if economy
 
       secondary_enum = Enumerator.new do |yielder|
         (0...total).each do |index|
@@ -2111,7 +2234,11 @@ module PointCloudImporter
         end
       end
 
-      initialize_color_rebuild_metrics(total: total, primary_total: primary_total, generation: generation)
+      initialize_color_rebuild_metrics(total: total,
+                                       primary_total: primary_total,
+                                       generation: generation,
+                                       economy: economy,
+                                       color_mode: @color_mode)
       resume_background_lod_build!(generation) if primary_total.zero?
 
       {
@@ -2122,7 +2249,8 @@ module PointCloudImporter
         total: total,
         primary_total: primary_total,
         primary_processed: 0,
-        last_source: nil
+        last_source: nil,
+        economy: economy
       }
     end
 
@@ -2133,7 +2261,9 @@ module PointCloudImporter
         enumerator = state[:primary_enum]
         if enumerator
           begin
-            return enumerator.next
+            value = enumerator.next
+            state[:last_source] = :primary
+            return value
           rescue StopIteration
             state[:primary_enum] = nil
           end
@@ -2144,7 +2274,9 @@ module PointCloudImporter
         return nil unless enumerator
 
         begin
-          return enumerator.next
+          value = enumerator.next
+          state[:last_source] = :secondary
+          return value
         rescue StopIteration
           state[:secondary_enum] = nil
           return nil
