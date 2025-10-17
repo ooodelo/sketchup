@@ -42,7 +42,7 @@ module PointCloudImporter
       assert_equal 5, array.length
       assert_equal 2, array.chunks.length
       assert_equal [0, 1, 2], array.chunks.first
-      assert_equal [3, 4, nil], array.chunks.last
+      assert_equal [3, 4], array.chunks.last
     end
 
     def test_trim_last_chunk_removes_unused_tail

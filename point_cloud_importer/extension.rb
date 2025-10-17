@@ -15,9 +15,9 @@ module PointCloudImporter
     DEFAULTS = {
       chunk_size: 1_000_000,
       yield_interval: 10_000,
-      binary_buffer_size: 1_048_576,
-      binary_vertex_batch_size: 4_096,
-      invalidate_every_n_chunks: 5,
+      binary_buffer_size: 4_194_304,
+      binary_vertex_batch_size: 8_192,
+      invalidate_every_n_chunks: 25,
       build_octree_async: true,
       logging_enabled: true,
       metrics_enabled: false
