@@ -124,6 +124,29 @@ module PointCloudImporter
                                         value
                                       end
 
+          default_buffer_size = config&.binary_buffer_size || settings[:binary_buffer_size] ||
+                                PlyParser::BINARY_READ_BUFFER_SIZE
+          buffer_source = job.options[:binary_buffer_size]
+          buffer_source = settings[:binary_buffer_size] if buffer_source.nil?
+          buffer_size = if config
+                          config.sanitize_binary_buffer_size(buffer_source || default_buffer_size)
+                        else
+                          sanitize_positive_integer(buffer_source, default_buffer_size)
+                        end
+
+          default_batch_size = config&.binary_vertex_batch_size || settings[:binary_vertex_batch_size] ||
+                               PlyParser::DEFAULT_BINARY_VERTEX_BATCH_SIZE
+          batch_source = job.options[:binary_vertex_batch_size]
+          batch_source = settings[:binary_vertex_batch_size] if batch_source.nil?
+          batch_size_preference = if config
+                                     config.sanitize_binary_vertex_batch_size(batch_source || default_batch_size)
+                                   else
+                                     sanitize_positive_integer(batch_source, default_batch_size)
+                                   end
+          batch_size_preference = clamp(batch_size_preference,
+                                        PlyParser::BINARY_VERTEX_BATCH_MIN,
+                                        PlyParser::BINARY_VERTEX_BATCH_MAX)
+
           Logger.debug do
             format(
               'Импорт: chunk_size=%<chunk>d, binary_buffer=%<buffer>s, vertex_batch=%<batch>d, invalidate_every=%<invalidate>d',
@@ -774,6 +797,30 @@ module PointCloudImporter
       config.respond_to?(:metrics_enabled?) && config.metrics_enabled?
     rescue StandardError
       false
+    end
+
+    def sanitize_positive_integer(value, default)
+      candidate =
+        case value
+        when nil
+          nil
+        when Integer
+          value
+        when Numeric
+          value.to_i
+        else
+          Integer(value)
+        end
+      candidate = nil if candidate.nil? || candidate < 1
+      candidate || [default, 1].max
+    rescue ArgumentError, TypeError
+      [default, 1].max
+    end
+
+    def clamp(value, min_value, max_value)
+      return min_value if value.nil?
+
+      [[value, min_value].max, max_value].min
     end
 
     def format_duration(value)
