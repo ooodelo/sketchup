@@ -12,6 +12,7 @@ require_relative 'inference_sampler'
 require_relative 'logger'
 require_relative 'threading'
 require_relative 'main_thread_queue'
+require_relative 'progress_estimator'
 
 module PointCloudImporter
   # Data structure representing a point cloud and display preferences.
@@ -187,6 +188,7 @@ module PointCloudImporter
       @lod_background_steps = nil
       @lod_background_context = nil
       @lod_background_generation = 0
+      @lod_background_suspension = nil
       @max_display_point_ramp = nil
       @render_density_override = nil
       @render_max_points_override = nil
@@ -219,6 +221,13 @@ module PointCloudImporter
       @scalar_cache_signature = nil
       @gradient_lut = nil
       @gradient_lut_key = nil
+      @color_geometry_generation = 0
+      @cached_color_bounds = nil
+      @cached_color_bounds_generation = nil
+      @random_color_cache = nil
+      @random_color_cache_generation = nil
+      @color_progress_estimator = ProgressEstimator.new
+      @color_metrics = nil
       @last_visible_point_count = 0
       @last_sampling_duration = nil
       append_points!(points, colors, intensities) if points && !points.empty?
@@ -260,6 +269,8 @@ module PointCloudImporter
     def clear_cache!
       cancel_background_lod_build!
       cancel_color_rebuild!
+      invalidate_color_geometry!
+      @color_progress_estimator&.reset
       @cache_dirty = true
       @display_points = nil
       @display_colors = nil
@@ -285,6 +296,7 @@ module PointCloudImporter
       @scalar_cache_generation = 0
       @scalar_cache_signature = nil
       @lod_background_task = nil
+      @lod_background_suspension = nil
     end
 
     def visible?
@@ -536,7 +548,7 @@ module PointCloudImporter
       @render_cache_preparation_pending = false
     end
 
-    def draw(view)
+    def draw(view, draw_context = nil)
       Threading.guard(:ui, message: 'PointCloud#draw')
       ensure_display_caches!
       caches = @lod_caches
@@ -554,10 +566,10 @@ module PointCloudImporter
       progress = lod_transition_progress
       if @lod_previous_level && @lod_previous_level != @lod_current_level && progress < 1.0
         previous_cache = caches[@lod_previous_level]
-        draw_cache(view, previous_cache, 1.0 - progress, style) if previous_cache
-        draw_cache(view, current_cache, progress, style)
+        draw_cache(view, previous_cache, 1.0 - progress, style, draw_context) if previous_cache
+        draw_cache(view, current_cache, progress, style, draw_context)
       else
-        draw_cache(view, current_cache, 1.0, style)
+        draw_cache(view, current_cache, 1.0, style, draw_context)
       end
 
       finalize_lod_transition! if progress >= 1.0
@@ -919,6 +931,7 @@ module PointCloudImporter
       clear_color_cache!
 
       update_bounds_with_chunk(points_chunk)
+      invalidate_color_geometry!
 
       mark_display_cache_dirty!
     end
@@ -942,6 +955,7 @@ module PointCloudImporter
     end
 
     def reset_bounds_state!
+      invalidate_color_geometry!
       @bounds_min_x = nil
       @bounds_min_y = nil
       @bounds_min_z = nil
@@ -1009,6 +1023,14 @@ module PointCloudImporter
       end
 
       @bounding_box_dirty = true
+    end
+
+    def invalidate_color_geometry!
+      @color_geometry_generation = @color_geometry_generation.to_i + 1
+      @cached_color_bounds = nil
+      @cached_color_bounds_generation = nil
+      @random_color_cache = nil
+      @random_color_cache_generation = nil
     end
 
     AXIS_INDICES = { x: 0, y: 1, z: 2 }.freeze
@@ -1219,6 +1241,7 @@ module PointCloudImporter
       end
       @color_rebuild_pending = false
       @color_rebuild_state = nil
+      resume_background_lod_build!
     end
 
     def current_color_cache_key
@@ -1496,12 +1519,46 @@ module PointCloudImporter
       color_from_storage(packed_random_color(index))
     end
 
+    def ensure_random_color_cache
+      total = @points ? @points.length : 0
+      return nil if total <= 0
+
+      generation = @color_geometry_generation
+      cache_generation = @random_color_cache_generation
+      cache = @random_color_cache
+
+      if cache.nil? || cache.length != total || cache_generation != generation
+        cache = build_random_color_table(total, generation)
+        @random_color_cache = cache
+        @random_color_cache_generation = generation
+      end
+
+      cache
+    rescue StandardError
+      @random_color_cache = nil
+      nil
+    end
+
+    def build_random_color_table(total, generation)
+      seed = (@random_seed || 0) ^ generation.to_i
+      state = seed & 0xffffffff
+      Array.new(total) do
+        state = ((state * 1_664_525) + 1_013_904_223) & 0xffffffff
+        r = (((state >> 16) & 0xff) / 2.0 + 64).round.clamp(0, 255)
+        g = (((state >> 8) & 0xff) / 2.0 + 64).round.clamp(0, 255)
+        b = ((state & 0xff) / 2.0 + 64).round.clamp(0, 255)
+        pack_color_components([r, g, b]) || DEFAULT_PACKED_COLOR
+      end
+    rescue StandardError
+      Array.new(total, DEFAULT_PACKED_COLOR)
+    end
+
     def packed_random_color(index)
-      seed = (@random_seed + index.to_i * 1_103_515_245 + 12_345) & 0xffffffff
-      r = (((seed >> 16) & 0xff) / 2.0 + 64).round.clamp(0, 255)
-      g = (((seed >> 8) & 0xff) / 2.0 + 64).round.clamp(0, 255)
-      b = ((seed & 0xff) / 2.0 + 64).round.clamp(0, 255)
-      pack_color_components([r, g, b]) || DEFAULT_PACKED_COLOR
+      cache = ensure_random_color_cache
+      return DEFAULT_PACKED_COLOR unless cache
+
+      cached = cache[index.to_i]
+      cached.nil? ? DEFAULT_PACKED_COLOR : cached
     rescue StandardError
       DEFAULT_PACKED_COLOR
     end
@@ -1528,17 +1585,56 @@ module PointCloudImporter
       0.0
     end
 
+    def color_bounds
+      generation = @color_geometry_generation
+      cache_generation = @cached_color_bounds_generation
+      cached = @cached_color_bounds
+
+      if cache_generation != generation || cached.nil?
+        min_x = @bounds_min_x
+        min_y = @bounds_min_y
+        min_z = @bounds_min_z
+        max_x = @bounds_max_x
+        max_y = @bounds_max_y
+        max_z = @bounds_max_z
+
+        if [min_x, min_y, min_z, max_x, max_y, max_z].any?(&:nil?)
+          cached = nil
+        else
+          cached = {
+            min_x: min_x,
+            min_y: min_y,
+            min_z: min_z,
+            max_x: max_x,
+            max_y: max_y,
+            max_z: max_z,
+            range_x: max_x - min_x,
+            range_y: max_y - min_y,
+            range_z: max_z - min_z
+          }
+        end
+
+        @cached_color_bounds = cached
+        @cached_color_bounds_generation = generation
+      end
+
+      cached
+    rescue StandardError
+      @cached_color_bounds = nil
+      @cached_color_bounds_generation = generation
+      nil
+    end
+
     def normalize_height(point)
-      bbox = bounding_box
-      return 0.5 unless bbox
+      bounds = color_bounds
+      return 0.5 unless bounds
 
       z = point_coordinate(point, :z)
       return 0.5 if z.nil?
 
-      min_z = bbox.min.z
-      max_z = bbox.max.z
-      range = max_z - min_z
-      return 0.5 if range.abs < Float::EPSILON
+      min_z = bounds[:min_z]
+      range = bounds[:range_z]
+      return 0.5 if !range || range.abs < Float::EPSILON
 
       clamp01((z.to_f - min_z) / range)
     rescue StandardError
@@ -1550,18 +1646,15 @@ module PointCloudImporter
     end
 
     def packed_rgb_from_xyz(point)
-      bbox = bounding_box
-      return DEFAULT_PACKED_COLOR unless bbox
-
       coords = point_coordinates(point)
       return DEFAULT_PACKED_COLOR unless coords
 
-      min = bbox.min
-      max = bbox.max
+      bounds = color_bounds
+      return DEFAULT_PACKED_COLOR unless bounds
 
-      x = normalize_component(coords[0], min.x, max.x)
-      y = normalize_component(coords[1], min.y, max.y)
-      z = normalize_component(coords[2], min.z, max.z)
+      x = normalize_component(coords[0], bounds[:min_x], bounds[:max_x])
+      y = normalize_component(coords[1], bounds[:min_y], bounds[:max_y])
+      z = normalize_component(coords[2], bounds[:min_z], bounds[:max_z])
 
       pack_color_components([
         (x * 255).round.clamp(0, 255),
@@ -1606,6 +1699,7 @@ module PointCloudImporter
       @octree_metadata = nil
       @lod_caches = {}
       @lod_cache_generation = (@lod_cache_generation || 0) + 1
+      invalidate_color_geometry!
 
       return unless points && !points.empty?
 
@@ -1704,6 +1798,7 @@ module PointCloudImporter
       cancel_color_rebuild!
       generation = @color_rebuild_generation
       @color_rebuild_pending = true
+      suspend_background_lod_build_for_color!(generation)
 
       scheduler = MainThreadScheduler.instance
       launcher = lambda do
@@ -1724,6 +1819,217 @@ module PointCloudImporter
       end
 
       assign_primary_cache(@lod_caches[@lod_current_level || LOD_LEVELS.first])
+    end
+
+    def suspend_background_lod_build_for_color!(generation)
+      background_generation = @lod_background_generation
+      return unless background_generation && background_generation.positive?
+
+      @lod_background_suspension = {
+        background_generation: background_generation,
+        color_generation: generation
+      }
+    end
+
+    def background_build_suspended?
+      suspension = @lod_background_suspension
+      return false unless suspension
+
+      suspension[:background_generation] == @lod_background_generation &&
+        suspension[:color_generation] == @color_rebuild_generation
+    rescue StandardError
+      false
+    end
+
+    def resume_background_lod_build!(generation = nil)
+      suspension = @lod_background_suspension
+      return unless suspension
+
+      if generation && suspension[:color_generation] != generation
+        return
+      end
+
+      @lod_background_suspension = nil
+    end
+
+    def initialize_color_rebuild_metrics(total:, primary_total:, generation:)
+      estimator = (@color_progress_estimator ||= ProgressEstimator.new)
+      estimator.reset(total_vertices: total)
+      @color_metrics = {
+        generation: generation,
+        started_at: safe_monotonic_time,
+        total: total,
+        primary_total: primary_total,
+        processed: 0,
+        primary_processed: 0,
+        primary_completed_at: nil,
+        peak_memory: current_memory_usage,
+        last_rate: nil
+      }
+    end
+
+    def update_color_rebuild_metrics(state, primary_in_batch)
+      metrics = @color_metrics
+      return unless metrics
+
+      metrics[:processed] = state[:processed]
+
+      if primary_in_batch.positive?
+        metrics[:primary_processed] = state[:primary_processed]
+        if metrics[:primary_completed_at].nil? &&
+           metrics[:primary_total].to_i.positive? &&
+           metrics[:primary_processed] >= metrics[:primary_total]
+          metrics[:primary_completed_at] = safe_monotonic_time
+          resume_background_lod_build!(state[:generation])
+        end
+      end
+
+      usage = current_memory_usage
+      if usage && usage.respond_to?(:to_i)
+        usage = usage.to_i
+        previous = metrics[:peak_memory]
+        metrics[:peak_memory] = previous ? [previous, usage].max : usage
+      end
+
+      emit_color_status_if_needed(state)
+    end
+
+    def emit_color_status_if_needed(state, force: false)
+      metrics = @color_metrics
+      return unless metrics
+
+      estimator = (@color_progress_estimator ||= ProgressEstimator.new)
+      estimator.update(processed_vertices: state[:processed])
+      fraction = if state[:total].positive?
+                   state[:processed].to_f / state[:total]
+                 else
+                   nil
+                 end
+
+      message = build_color_status_message(metrics, fraction)
+      now = estimator.monotonic_time
+
+      should_emit = force || estimator.poll(message: message,
+                                           fraction: fraction,
+                                           now: now,
+                                           respect_message_change: false)
+      return unless should_emit
+
+      begin
+        Sketchup.status_text = message if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+      rescue StandardError
+        nil
+      end
+    end
+
+    def build_color_status_message(metrics, fraction)
+      processed = metrics[:processed].to_i
+      total = metrics[:total].to_i
+      started_at = metrics[:started_at]
+      elapsed = started_at ? (safe_monotonic_time - started_at) : nil
+      rate = if elapsed && elapsed.positive?
+               processed / elapsed
+             else
+               0.0
+             end
+      metrics[:last_rate] = rate
+
+      percent = fraction ? (fraction * 100.0) : 0.0
+
+      format('Перекраска облака: %<percent>.1f%% (%<processed>s/%<total>s, %<rate>s)',
+             percent: percent,
+             processed: format_point_count(processed),
+             total: format_point_count(total),
+             rate: format_rate(rate))
+    rescue StandardError
+      'Перекраска облака'
+    end
+
+    def current_memory_usage
+      stats = GC.stat
+      stats[:heap_live_slots] || stats[:heap_used] || stats[:total_allocated_objects]
+    rescue StandardError
+      nil
+    end
+
+    def format_point_count(value)
+      count = value.to_i
+      return '0' if count <= 0
+
+      if count >= 1_000_000
+        format('%.1fM', count / 1_000_000.0)
+      elsif count >= 1_000
+        format('%.1fk', count / 1_000.0)
+      else
+        count.to_s
+      end
+    rescue StandardError
+      count.to_s
+    end
+
+    def format_rate(value)
+      return '0 тчк/с' unless value && value.finite? && value.positive?
+
+      rate = value.to_f
+      if rate >= 1_000_000.0
+        format('%.1fM тчк/с', rate / 1_000_000.0)
+      elsif rate >= 1_000.0
+        format('%.1fk тчк/с', rate / 1_000.0)
+      else
+        format('%d тчк/с', rate.round)
+      end
+    rescue StandardError
+      '0 тчк/с'
+    end
+
+    def finalize_color_rebuild_metrics(success)
+      metrics = @color_metrics
+      return unless metrics
+
+      finished_at = safe_monotonic_time
+      metrics[:processed] = metrics[:processed].to_i
+      metrics[:finished_at] = finished_at
+
+      log_color_rebuild_metrics(metrics, success)
+
+      @color_metrics = nil
+    end
+
+    def log_color_rebuild_metrics(metrics, success)
+      started_at = metrics[:started_at] || metrics[:finished_at]
+      finished_at = metrics[:finished_at] || safe_monotonic_time
+      total_duration = finished_at - started_at
+      primary_duration = if metrics[:primary_completed_at]
+                           metrics[:primary_completed_at] - started_at
+                         else
+                           0.0
+                         end
+      total_duration = 0.0 if total_duration&.negative?
+      primary_duration = 0.0 if primary_duration&.negative?
+
+      processed = metrics[:processed].to_i
+      total = metrics[:total].to_i
+      rate = if total_duration && total_duration.positive?
+               processed / total_duration
+             else
+               0.0
+             end
+
+      Logger.debug do
+        format('color_rebuild;%<cloud>s;%<generation>d;%<success>s;%<processed>d;%<total>d;%<primary_total>d;%<duration>.3f;%<primary_duration>.3f;%<rate>.1f;%<peak_memory>d',
+               cloud: name.to_s,
+               generation: metrics[:generation].to_i,
+               success: success ? 1 : 0,
+               processed: processed,
+               total: total,
+               primary_total: metrics[:primary_total].to_i,
+               duration: total_duration || 0.0,
+               primary_duration: primary_duration || 0.0,
+               rate: rate,
+               peak_memory: metrics[:peak_memory].to_i)
+      end
+    rescue StandardError
+      nil
     end
 
     def build_base_cache(limit:)
@@ -1795,6 +2101,8 @@ module PointCloudImporter
       primary_lookup = {}
       primary_indices.each { |index| primary_lookup[index] = true }
 
+      primary_total = primary_indices.length
+
       secondary_enum = Enumerator.new do |yielder|
         (0...total).each do |index|
           next if primary_lookup[index]
@@ -1803,12 +2111,18 @@ module PointCloudImporter
         end
       end
 
+      initialize_color_rebuild_metrics(total: total, primary_total: primary_total, generation: generation)
+      resume_background_lod_build!(generation) if primary_total.zero?
+
       {
         generation: generation,
         primary_enum: primary_enum,
         secondary_enum: secondary_enum,
         processed: 0,
-        total: total
+        total: total,
+        primary_total: primary_total,
+        primary_processed: 0,
+        last_source: nil
       }
     end
 
@@ -1855,6 +2169,7 @@ module PointCloudImporter
 
       batch_limit = state[:processed].zero? ? COLOR_REBUILD_INITIAL_BATCH : COLOR_REBUILD_BATCH
       processed = 0
+      primary_in_batch = 0
       updated = []
       deadline = context&.deadline
 
@@ -1865,11 +2180,19 @@ module PointCloudImporter
         index = fetch_next_color_index(state)
         break unless index
 
+        source = state[:last_source]
+        if source == :primary
+          primary_in_batch += 1
+          state[:primary_processed] = state[:primary_processed].to_i + 1
+        end
+
         buffer[index] = packed_display_color_for_index(index)
         updated << index
         processed += 1
         state[:processed] += 1
       end
+
+      update_color_rebuild_metrics(state, primary_in_batch)
 
       unless updated.empty?
         apply_packed_colors_to_caches(updated, buffer)
@@ -1877,7 +2200,7 @@ module PointCloudImporter
       end
 
       if color_rebuild_state_complete?(state)
-        finalize_color_rebuild
+        finalize_color_rebuild(success: true)
         :done
       else
         context.reschedule_in = 0.0 if context
@@ -1885,7 +2208,7 @@ module PointCloudImporter
       end
     rescue StandardError => e
       Logger.debug { "Color rebuild failed: #{e.class}: #{e.message}" }
-      finalize_color_rebuild
+      finalize_color_rebuild(success: false)
       :done
     end
 
@@ -1909,7 +2232,11 @@ module PointCloudImporter
       end
     end
 
-    def finalize_color_rebuild
+    def finalize_color_rebuild(success: true)
+      state = @color_rebuild_state
+      emit_color_status_if_needed(state, force: true) if state
+      finalize_color_rebuild_metrics(success)
+      resume_background_lod_build!(state ? state[:generation] : nil)
       @color_rebuild_pending = false
       @color_rebuild_task = nil
       @color_rebuild_state = nil
@@ -1980,6 +2307,7 @@ module PointCloudImporter
 
       @lod_background_context = context
       @max_display_point_ramp = nil
+      @lod_background_suspension = nil
 
       steps = build_background_steps(context, target_limit, base_size, background_generation)
 
@@ -2078,6 +2406,11 @@ module PointCloudImporter
       unless background_context_active?(context)
         finalize_background_build(context)
         return false
+      end
+
+      if background_build_suspended?
+        context[:suspended] = true if context
+        return true
       end
 
       iterations = context[:iterations].to_i + 1
@@ -2563,6 +2896,7 @@ module PointCloudImporter
       @lod_background_context = nil
       @max_display_point_ramp = nil
       @lod_background_generation = @lod_background_generation.to_i + 1
+      @lod_background_suspension = nil
     end
 
     def build_octree_async?
@@ -2589,7 +2923,7 @@ module PointCloudImporter
                  max_depth: @settings[:octree_max_depth])
     end
 
-    def draw_cache(view, cache, weight, style)
+    def draw_cache(view, cache, weight, style, draw_context)
       return unless cache
 
       points = cache[:points]
@@ -2605,8 +2939,8 @@ module PointCloudImporter
         draw_options = { size: @point_size }
         draw_options[:style] = style if style
         if colors
-          colors_slice = colors.slice(start_index..end_index)
-          draw_options[:colors] = converted_colors(colors_slice, alpha_weight)
+          converted = converted_colors(colors, start_index, end_index, alpha_weight, draw_context)
+          draw_options[:colors] = converted if converted
         elsif alpha_weight < 0.999
           draw_options[:color] = blended_monochrome(alpha_weight)
         end
@@ -2615,23 +2949,40 @@ module PointCloudImporter
       end
     end
 
-    def converted_colors(packed_colors, weight)
+    def draw_color_resources(draw_context)
+      if draw_context
+        pool = draw_context[:color_pool] ||= []
+        buffer = draw_context[:color_buffer] ||= []
+        [pool, buffer]
+      else
+        [[], []]
+      end
+    end
+
+    def converted_colors(packed_colors, start_index, end_index, weight, draw_context)
       return [] unless packed_colors
 
-      pool = (@draw_color_pool ||= [])
+      length = end_index - start_index + 1
+      return [] if length <= 0
+
+      pool, buffer = draw_color_resources(draw_context)
+      pool_length = pool.length
+      if pool_length < length
+        (pool_length...length).each { pool << nil }
+      end
+
+      buffer.length = length
+
       alpha = weight >= 0.999 ? 255 : (255 * weight).round.clamp(0, 255)
 
-      Array.new(packed_colors.length) do |index|
-        packed = packed_colors[index]
+      length.times do |offset|
+        packed = packed_colors[start_index + offset]
         packed = DEFAULT_PACKED_COLOR if packed.nil?
         r = (packed >> 16) & 0xff
         g = (packed >> 8) & 0xff
         b = packed & 0xff
-        color = pool[index]
-        unless color
-          color = Sketchup::Color.new(r, g, b, alpha)
-          pool[index] = color
-        else
+        color = pool[offset]
+        if color
           if color.respond_to?(:set)
             color.set(r, g, b, alpha)
           else
@@ -2640,9 +2991,14 @@ module PointCloudImporter
             color.blue = b if color.respond_to?(:blue=)
             color.alpha = alpha if color.respond_to?(:alpha=)
           end
+        else
+          color = Sketchup::Color.new(r, g, b, alpha)
+          pool[offset] = color
         end
-        color
+        buffer[offset] = color
       end
+
+      buffer
     end
 
     def blended_monochrome(weight)
