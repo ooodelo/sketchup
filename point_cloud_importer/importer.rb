@@ -995,7 +995,7 @@ module PointCloudImporter
       attempts = 0
       metrics_start = metrics_enabled ? Time.now : nil
       start_monotonic = monotonic_time
-      timer_id = nil
+      task_handle = nil
 
       finalize = lambda do |success|
         cloud.clear_render_cache_preparation_pending! if cloud.respond_to?(:clear_render_cache_preparation_pending!)
@@ -1010,6 +1010,11 @@ module PointCloudImporter
             peak_memory_bytes: memory_fetcher.call,
             enabled: metrics_enabled
           )
+        end
+
+        if task_handle
+          task_handle.cancel
+          task_handle = nil
         end
       end
 
@@ -1031,10 +1036,6 @@ module PointCloudImporter
 
         if success
           finalize.call(true)
-          if timer_id
-            ::UI.stop_timer(timer_id)
-            timer_id = nil
-          end
           true
         elsif attempts >= RENDER_CACHE_MAX_ATTEMPTS || elapsed >= RENDER_CACHE_TIMEOUT
           Logger.debug do
@@ -1045,10 +1046,6 @@ module PointCloudImporter
             )
           end
           finalize.call(false)
-          if timer_id
-            ::UI.stop_timer(timer_id)
-            timer_id = nil
-          end
           true
         else
           false
@@ -1058,14 +1055,17 @@ module PointCloudImporter
       completed = attempt.call
       return if completed
 
-      unless defined?(::UI) && ::UI.respond_to?(:start_timer)
-        Logger.debug('Таймеры UI недоступны, подготовка рендер-кэша остановлена досрочно')
-        finalize.call(false)
-        return
-      end
-
-      timer_id = ::UI.start_timer(RENDER_CACHE_RETRY_INTERVAL, repeat: true) do
-        attempt.call
+      scheduler = MainThreadScheduler.instance
+      task_handle = scheduler.schedule(name: 'render-cache-preparation',
+                                       priority: 150,
+                                       delay: RENDER_CACHE_RETRY_INTERVAL) do |context|
+        continue = attempt.call
+        if continue
+          :done
+        else
+          context.reschedule_in = RENDER_CACHE_RETRY_INTERVAL
+          :pending
+        end
       end
     end
 
