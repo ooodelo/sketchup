@@ -62,6 +62,11 @@ module PointCloudImporter
       SettingsBuffer.instance.write_setting(key, value)
     end
 
+    def snapshot
+      buffer = SettingsBuffer.instance
+      buffer.snapshot(@values)
+    end
+
     def load!
       stored = Sketchup.read_default(preferences_namespace, 'values')
       if stored.is_a?(Hash)

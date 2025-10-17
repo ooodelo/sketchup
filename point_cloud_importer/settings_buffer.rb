@@ -9,15 +9,27 @@ module PointCloudImporter
   class SettingsBuffer
     include Singleton
 
+    Snapshot = Struct.new(:version, :values) do
+      def [](key)
+        values[key.to_sym]
+      end
+
+      def to_h
+        values.dup
+      end
+    end
+
     def initialize
       @pending = new_pending_hash
       @mutex = Mutex.new
+      @version = 0
     end
 
     def write(namespace, key, value)
       key = key.to_s
       @mutex.synchronize do
         @pending[namespace][key] = value
+        bump_version!
       end
     end
 
@@ -49,13 +61,49 @@ module PointCloudImporter
     def discard!
       @mutex.synchronize do
         @pending = new_pending_hash
+        bump_version!
       end
+    end
+
+    def snapshot(values)
+      data = nil
+      version = nil
+      @mutex.synchronize do
+        version = @version
+        data = deep_dup(values)
+      end
+      Snapshot.new(version, data.freeze)
+    end
+
+    def current_version
+      @mutex.synchronize { @version }
     end
 
     private
 
     def new_pending_hash
       Hash.new { |hash, namespace| hash[namespace] = {} }
+    end
+
+    def bump_version!
+      @version += 1
+    end
+
+    def deep_dup(object)
+      case object
+      when Hash
+        object.each_with_object({}) do |(key, value), memo|
+          memo[key] = deep_dup(value)
+        end.freeze
+      when Array
+        object.map { |entry| deep_dup(entry) }.freeze
+      else
+        begin
+          object.dup.freeze
+        rescue TypeError
+          object
+        end
+      end
     end
   end
 end

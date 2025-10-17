@@ -6,6 +6,8 @@ require 'digest/sha1'
 require 'fileutils'
 require 'tmpdir'
 
+require_relative 'logger'
+
 module PointCloudImporter
   # A lightweight KD-tree for nearest neighbor lookup.
   class SpatialIndex
@@ -38,17 +40,11 @@ module PointCloudImporter
       @root = load_from_cache(@cache_key) if @cache_key
 
       unless @root
-        data = []
-        points.each_with_index do |point, local_index|
-          entry_index = indices[local_index]
-          next if entry_index.nil?
-
-          converted = ensure_point3d(point)
-          next unless converted
-
-          data << [converted, entry_index]
+        builder = build_incremental(points, indices, max_depth: max_depth)
+        until builder.finished?
+          builder.step(time_budget: nil)
         end
-        @root = build(data, max_depth: max_depth)
+        @root = builder.root
         persist_cache(@cache_key, @root) if @cache_key && @root
       end
     end
@@ -61,45 +57,25 @@ module PointCloudImporter
       search(@root, target, best, max_distance_sq)
     end
 
+    def within_radius(target, radius)
+      return [] unless @root
+
+      results = []
+      radius_sq = radius.to_f**2
+      collect_within_radius(@root, target, radius_sq, results)
+      results
+    end
+
     private
 
-    def build(data, max_depth: DEFAULT_MAX_DEPTH)
-      return nil if data.empty?
+    def build_incremental(points, indices, max_depth: DEFAULT_MAX_DEPTH, progress_callback: nil)
+      data = gather_entries(points, indices)
+      return NullBuilder.new(self) if data.empty?
 
-      root = Node.new
-      stack = [[root, data, 0, compute_bounds(data)]]
-
-      until stack.empty?
-        node, entries, depth, bounds = stack.pop
-
-        if depth >= max_depth || entries.length <= 1
-          node.entries = entries
-          next
-        end
-
-        axis, _split_value, pivot_entry, left_entries, right_entries = partition_entries(entries, bounds, depth)
-
-        if pivot_entry.nil? || axis.nil?
-          node.entries = entries
-          next
-        end
-
-        node.axis = axis
-        node.point = pivot_entry[0]
-        node.index = pivot_entry[1]
-
-        unless left_entries.empty?
-          node.left = Node.new
-          stack << [node.left, left_entries, depth + 1, compute_bounds(left_entries)]
-        end
-
-        unless right_entries.empty?
-          node.right = Node.new
-          stack << [node.right, right_entries, depth + 1, compute_bounds(right_entries)]
-        end
-      end
-
-      root
+      Builder.new(self,
+                  data: data,
+                  max_depth: max_depth,
+                  progress_callback: progress_callback)
     end
 
     def partition_entries(entries, bounds, depth)
@@ -195,6 +171,41 @@ module PointCloudImporter
       best
     end
 
+    def collect_within_radius(node, target, radius_sq, results)
+      return unless node
+
+      if node.point
+        distance_sq = squared_distance(node.point, target)
+        if distance_sq <= radius_sq
+          results << { point: node.point, index: node.index, distance: Math.sqrt(distance_sq) }
+        end
+      end
+
+      if node.leaf?
+        node.entries.each do |point, index|
+          distance_sq = squared_distance(point, target)
+          if distance_sq <= radius_sq
+            results << { point: point, index: index, distance: Math.sqrt(distance_sq) }
+          end
+        end
+        return
+      end
+
+      axis = node.axis
+      value = coordinate(target, axis)
+      node_value = coordinate(node.point, axis)
+
+      first_branch = value < node_value ? node.left : node.right
+      second_branch = value < node_value ? node.right : node.left
+
+      collect_within_radius(first_branch, target, radius_sq, results)
+
+      axis_distance_sq = (value - node_value)**2
+      if second_branch && axis_distance_sq <= radius_sq
+        collect_within_radius(second_branch, target, radius_sq, results)
+      end
+    end
+
     def nearest_from_node(node, target, max_distance_sq)
       candidates = []
 
@@ -212,6 +223,20 @@ module PointCloudImporter
 
       candidates.select! { |candidate| max_distance_sq.nil? || candidate[:distance] <= max_distance_sq }
       candidates.min_by { |candidate| candidate[:distance] }
+    end
+
+    def gather_entries(points, indices)
+      data = []
+      points.each_with_index do |point, local_index|
+        entry_index = indices[local_index]
+        next if entry_index.nil?
+
+        converted = ensure_point3d(point)
+        next unless converted
+
+        data << [converted, entry_index]
+      end
+      data
     end
 
     def compute_bounds(entries)
@@ -518,6 +543,141 @@ module PointCloudImporter
       node.left = deserialize_node(payload['left']) if payload['left']
       node.right = deserialize_node(payload['right']) if payload['right']
       node
+    end
+
+    class NullBuilder
+      Step = Struct.new(:ready_nodes, :progress, :finished)
+
+      def initialize(_index); end
+
+      def step(time_budget: nil)
+        Step.new([], 1.0, true)
+      end
+
+      def finished?
+        true
+      end
+
+      def root
+        nil
+      end
+    end
+
+    class Builder
+      Step = Struct.new(:ready_nodes, :progress, :finished)
+
+      def initialize(index, data:, max_depth:, progress_callback: nil)
+        @index = index
+        @max_depth = max_depth
+        @progress_callback = progress_callback
+        @queue = []
+        @processed = 0
+        @total = data.length
+        @root = Node.new
+        enqueue(@root, data, 0)
+        @finished = data.empty?
+      end
+
+      def step(time_budget: 0.008)
+        return Step.new([], 1.0, true) if finished?
+
+        ready_nodes = []
+        deadline = time_budget ? monotonic_time + time_budget.to_f : nil
+
+        while (work = @queue.shift)
+          node, entries, depth, bounds = work
+          process(node, entries, depth, bounds, ready_nodes)
+          break if deadline && monotonic_time >= deadline
+        end
+
+        progress = progress_fraction
+        notify(progress, ready_nodes)
+        Step.new(ready_nodes, progress, finished?)
+      end
+
+      def finished?
+        @finished
+      end
+
+      def root
+        @root
+      end
+
+      private
+
+      def enqueue(node, entries, depth)
+        bounds = @index.send(:compute_bounds, entries)
+        @queue << [node, entries, depth, bounds]
+      end
+
+      def process(node, entries, depth, bounds, ready_nodes)
+        if depth >= @max_depth || entries.length <= 1
+          node.entries = entries
+          ready_nodes << node
+          @processed += entries.length
+          mark_finished_if_idle
+          return
+        end
+
+        axis, _split_value, pivot_entry, left_entries, right_entries =
+          @index.send(:partition_entries, entries, bounds, depth)
+
+        if pivot_entry.nil? || axis.nil?
+          node.entries = entries
+          ready_nodes << node
+          @processed += entries.length
+          mark_finished_if_idle
+          return
+        end
+
+        node.axis = axis
+        node.point = pivot_entry[0]
+        node.index = pivot_entry[1]
+        @processed += 1
+
+        unless left_entries.empty?
+          node.left = Node.new
+          enqueue(node.left, left_entries, depth + 1)
+        end
+
+        unless right_entries.empty?
+          node.right = Node.new
+          enqueue(node.right, right_entries, depth + 1)
+        end
+
+        mark_finished_if_idle
+      end
+
+      def mark_finished_if_idle
+        @finished = @queue.empty?
+      end
+
+      def progress_fraction
+        return 1.0 if @total.zero?
+
+        value = @processed.to_f / @total
+        [[value, 0.0].max, 1.0].min
+      rescue StandardError
+        0.0
+      end
+
+      def notify(progress, ready_nodes)
+        return unless @progress_callback
+
+        @progress_callback.call(progress, ready_nodes.compact)
+      rescue StandardError => e
+        Logger.debug { "Spatial index builder progress failed: #{e.class}: #{e.message}" }
+      end
+
+      def monotonic_time
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      rescue NameError, Errno::EINVAL
+        Process.clock_gettime(:float_second)
+      rescue NameError, ArgumentError, Errno::EINVAL
+        Process.clock_gettime(Process::CLOCK_REALTIME)
+      rescue NameError, Errno::EINVAL
+        Time.now.to_f
+      end
     end
   end
 end

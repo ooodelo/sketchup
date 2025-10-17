@@ -3,6 +3,8 @@
 
 require 'matrix'
 
+require_relative 'spatial_index'
+
 module PointCloudImporter
   # Performs adaptive sampling of a point cloud for inference guides.
   class InferenceSampler
@@ -24,15 +26,39 @@ module PointCloudImporter
     def compute_sample
       return [] unless @points && @points.length.positive?
 
-      report_progress(:grid, 0.0)
-      build_spatial_grid!
-      report_progress(:grid, 0.2)
+      normalized_points, index_mapping = normalized_points_and_indices
+      return [] if normalized_points.empty?
 
-      curvatures = compute_curvatures
+      report_progress(:grid, 0.1)
+
+      spatial_index = SpatialIndex.new(normalized_points, index_mapping, cache: false)
+
+      center, bounding_radius = bounds_statistics(normalized_points)
+      candidates = candidate_order(normalized_points, index_mapping, center)
+
       report_progress(:curvature, 0.5)
 
-      indices = select_points(curvatures)
-      report_progress(:selection, 0.8)
+      selected = []
+      excluded = {}
+      total_candidates = candidates.length.nonzero? || 1
+
+      candidates.each_with_index do |candidate, position|
+        original_index = candidate[:index]
+        next if excluded[original_index]
+
+        point = candidate[:point]
+        radius = adaptive_poisson_radius(candidate[:distance], bounding_radius)
+        neighbors = spatial_index.within_radius(point, radius)
+        neighbors.each { |neighbor| excluded[neighbor[:index]] = true }
+
+        selected << original_index
+        excluded[original_index] = true
+
+        progress_fraction = (position + 1).to_f / total_candidates
+        report_sampling_progress(progress_fraction)
+
+        break if selected.length >= @target_count
+      end
 
       report_progress(:completed, 1.0)
 
@@ -40,10 +66,84 @@ module PointCloudImporter
         yield(:completed, 1.0)
       end
 
-      indices
+      selected
     end
 
     private
+
+    def normalized_points_and_indices
+      return [[], []] unless @points
+
+      points = []
+      indices = []
+      @points.length.times do |index|
+        coords = point_coordinates(@points[index])
+        next unless coords
+
+        points << Geom::Point3d.new(coords[0], coords[1], coords[2])
+        indices << index
+      end
+
+      [points, indices]
+    end
+
+    def bounds_statistics(points)
+      return [Geom::Point3d.new, 0.0] if points.empty?
+
+      min_x = points.first.x
+      max_x = points.first.x
+      min_y = points.first.y
+      max_y = points.first.y
+      min_z = points.first.z
+      max_z = points.first.z
+
+      points.each do |point|
+        min_x = [min_x, point.x].min
+        max_x = [max_x, point.x].max
+        min_y = [min_y, point.y].min
+        max_y = [max_y, point.y].max
+        min_z = [min_z, point.z].min
+        max_z = [max_z, point.z].max
+      end
+
+      center = Geom::Point3d.new((min_x + max_x) * 0.5, (min_y + max_y) * 0.5, (min_z + max_z) * 0.5)
+      bounding_radius = points.map { |point| center.distance(point) }.max || 0.0
+      [center, bounding_radius]
+    end
+
+    def candidate_order(points, indices, center)
+      points.each_with_index.map do |point, local_index|
+        {
+          index: indices[local_index],
+          point: point,
+          distance: center.distance(point)
+        }
+      end.sort_by { |entry| -entry[:distance] }
+    end
+
+    def adaptive_poisson_radius(distance_from_center, bounding_radius)
+      base = if bounding_radius.positive?
+               bounding_radius / Math.sqrt(@target_count.to_f + 1.0)
+             else
+               @min_distance
+             end
+
+      base = [base, @min_distance].max
+      falloff = if bounding_radius.positive?
+                  (distance_from_center / bounding_radius).clamp(0.0, 1.0)
+                else
+                  0.0
+                end
+
+      scale = 1.0 + (falloff * 0.5)
+      base * scale
+    end
+
+    def report_sampling_progress(fraction)
+      eased = [[fraction.to_f, 0.0].max, 1.0].min
+      stage_progress = 0.3 + (0.5 * eased)
+      report_progress(:selection, stage_progress)
+    end
 
     def report_progress(stage, progress)
       @progress_callback&.call(stage, progress)

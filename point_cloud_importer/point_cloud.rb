@@ -19,6 +19,13 @@ module PointCloudImporter
     attr_reader :point_size, :point_style, :inference_sample_indices, :inference_mode
     attr_reader :color_mode, :color_gradient
 
+    def rename!(new_name)
+      candidate = new_name.to_s
+      candidate = 'Point Cloud' if candidate.strip.empty?
+      @name = candidate
+      self
+    end
+
     def manager
       return nil unless defined?(@manager_ref)
 
@@ -119,8 +126,11 @@ module PointCloudImporter
       ].freeze
     }.freeze
 
-    def initialize(name:, points: nil, colors: nil, intensities: nil, metadata: {}, chunk_capacity: nil)
-      @settings = Settings.instance
+    def initialize(name:, points: nil, colors: nil, intensities: nil, metadata: {}, chunk_capacity: nil,
+                   settings_snapshot: nil)
+      @settings_snapshot = settings_snapshot
+      @settings_version = settings_snapshot&.version
+      @settings = settings_snapshot || Settings.instance
       setting_chunk_capacity = @settings[:chunk_capacity].to_i
       setting_chunk_capacity = ChunkedArray::DEFAULT_CHUNK_CAPACITY if setting_chunk_capacity <= 0
       provided_chunk_capacity = chunk_capacity && chunk_capacity.to_i
