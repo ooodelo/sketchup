@@ -395,6 +395,34 @@ module PointCloudImporter
       ]
     end
 
+    def point_for_index(index)
+      return nil unless @points
+
+      raw_point = @points[index]
+      converted = point3d_from(raw_point)
+      if converted && !converted.equal?(raw_point) && @points.respond_to?(:[]=)
+        @points[index] = converted
+      end
+      converted
+    end
+
+    def point3d_from(point)
+      return point if point.is_a?(Geom::Point3d)
+
+      if point.respond_to?(:x) && point.respond_to?(:y) && point.respond_to?(:z)
+        Geom::Point3d.new(point.x.to_f, point.y.to_f, point.z.to_f)
+      elsif point.respond_to?(:[])
+        x = point[0]
+        y = point[1]
+        z = point[2]
+        return nil if x.nil? || y.nil? || z.nil?
+
+        Geom::Point3d.new(x.to_f, y.to_f, z.to_f)
+      end
+    rescue StandardError
+      nil
+    end
+
     def update_metadata
       @metadata = {
         max_points_per_node: @max_points_per_node,
@@ -588,34 +616,6 @@ module PointCloudImporter
         Geom::Point3d.new(min_point.x, max_point.y, max_point.z),
         Geom::Point3d.new(max_point.x, max_point.y, max_point.z)
       ]
-    end
-
-    def point_for_index(index)
-      return nil unless @points
-
-      raw_point = @points[index]
-      converted = point3d_from(raw_point)
-      if converted && !converted.equal?(raw_point) && @points.respond_to?(:[]=)
-        @points[index] = converted
-      end
-      converted
-    end
-
-    def point3d_from(point)
-      return point if point.is_a?(Geom::Point3d)
-
-      if point.respond_to?(:x) && point.respond_to?(:y) && point.respond_to?(:z)
-        Geom::Point3d.new(point.x.to_f, point.y.to_f, point.z.to_f)
-      elsif point.respond_to?(:[])
-        x = point[0]
-        y = point[1]
-        z = point[2]
-        return nil if x.nil? || y.nil? || z.nil?
-
-        Geom::Point3d.new(x.to_f, y.to_f, z.to_f)
-      end
-    rescue StandardError
-      nil
     end
 
     class << self
