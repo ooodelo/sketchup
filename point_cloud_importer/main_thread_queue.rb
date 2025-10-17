@@ -5,6 +5,7 @@ require 'singleton'
 require 'thread'
 
 require_relative 'logger'
+require_relative 'threading'
 
 module PointCloudImporter
   # Dispatch queue that ensures SketchUp API interactions are executed from the
@@ -31,6 +32,7 @@ module PointCloudImporter
     end
 
     def process_tick
+      Threading.guard(:ui, message: 'MainThreadQueue#process_tick')
       start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       processed = 0
 

@@ -11,6 +11,7 @@ require_relative 'ply_parser'
 require_relative 'import_job'
 require_relative 'logger'
 require_relative 'main_thread_queue'
+require_relative 'threading'
 require_relative 'ui/import_progress_dialog'
 
 module PointCloudImporter
@@ -91,6 +92,11 @@ module PointCloudImporter
 
     def import(path, options = {})
       options = (options || {}).dup
+      settings = Settings.instance
+      preset_key = options.delete(:preset) || options[:import_preset] || settings[:import_preset]
+      preset_parameters = settings.import_preset_parameters(preset_key)
+      options = preset_parameters.merge(options) if preset_parameters
+      options[:import_preset] = preset_key if preset_key
       options[:unit_scale] = resolve_unit_scale(options[:unit_scale])
       job = ImportJob.new(path, options)
       run_job(job)
@@ -346,6 +352,7 @@ module PointCloudImporter
     end
 
     def run_job(job)
+      Threading.guard(:ui, message: 'Importer#run_job')
       @last_result = nil
       metrics_enabled_flag = metrics_enabled?
       metrics_state = {
@@ -529,6 +536,13 @@ module PointCloudImporter
             )
 
             finalize_if_ready.call
+          when :failed
+            error = payload
+            unless job.finished?
+              error ||= RuntimeError.new('Фоновый шаг завершился с ошибкой')
+              job.fail!(error)
+            end
+            finalize_if_ready.call
           when :worker_finished
             worker_finished = true
             finalize_if_ready.call
@@ -545,9 +559,13 @@ module PointCloudImporter
         MainThreadDispatcher.enqueue { handle_message.call(message, payload) }
       end
 
-      worker = Thread.new do
-        Thread.current.abort_on_exception = false
+      worker = Threading.run_background(
+        name: 'import_worker',
+        dispatcher: dispatch,
+        on_failure: ->(error) { job.fail!(error) unless job.finished? }
+      ) do
         begin
+          Threading.guard(:bg, message: 'import_worker')
           job.start!
           job.transition_async(:parsing)
           job.update_progress(processed_vertices: 0, message: 'Чтение PLY...')
@@ -760,10 +778,10 @@ module PointCloudImporter
           job.mark_cancelled!
         rescue PlyParser::UnsupportedFormat => e
           job.fail!(e)
+          raise
         rescue ImportJob::TimeoutError => e
           job.fail!(e)
-        rescue StandardError => e
-          job.fail!(e)
+          raise
         ensure
           dispatch.call(:worker_finished)
         end
@@ -971,6 +989,7 @@ module PointCloudImporter
     end
 
     def schedule_render_cache_preparation(cloud, metrics_enabled:, metric_logger:, memory_fetcher:)
+      Threading.guard(:ui, message: 'Importer#schedule_render_cache_preparation')
       return unless cloud
 
       attempts = 0

@@ -8,6 +8,7 @@ require_relative '../ui/manager_dialog'
 require_relative '../ui/manager_panel'
 require_relative '../ui/first_import_wizard'
 require_relative '../ui/measurement_history_dialog'
+require_relative '../stress_tester'
 
 module PointCloudImporter
   module UI
@@ -82,6 +83,11 @@ module PointCloudImporter
         end
         @commands[:measurement_history].tooltip = 'Просмотреть последние измерения'
 
+        @commands[:stress_test] = ::UI::Command.new('Стресс-тест импорта') do
+          StressTester.new(@manager).run
+        end
+        @commands[:stress_test].tooltip = 'Запустить эталонный импорт с записью телеметрии'
+
         @commands[:manage] = ::UI::Command.new('Менеджер облаков...') do
           UI::ManagerDialog.new(@manager).show
         end
@@ -111,6 +117,8 @@ module PointCloudImporter
         menu.add_item(@commands[:toggle_inference])
         menu.add_item(@commands[:measurement_tool])
         menu.add_item(@commands[:measurement_history])
+        menu.add_separator
+        menu.add_item(@commands[:stress_test])
       end
 
       def add_help_menu_items
