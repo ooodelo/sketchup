@@ -20,15 +20,18 @@ module PointCloudImporter
       @render_states = {}
       @diagnostic_lines = []
       @last_diagnostic_update = -Float::INFINITY
+      @color_draw_context = { color_pool: [], color_buffer: [] }
     end
 
     def draw(view)
       Threading.guard(:ui, message: 'ViewerOverlay#draw')
       clouds = Array(@manager.clouds)
       apply_render_throttle(clouds)
-      @manager.draw(view)
+      draw_context = ensure_color_draw_context
+      @manager.draw(view, draw_context)
       update_diagnostics(view)
       render_diagnostics(view)
+      trim_color_draw_context
       cleanup_render_states(clouds)
     end
 
@@ -154,6 +157,30 @@ module PointCloudImporter
           # ignore cleanup failures
         end
         @render_states.delete(cloud)
+      end
+    end
+
+    def ensure_color_draw_context
+      context = (@color_draw_context ||= { color_pool: [], color_buffer: [] })
+      context[:color_pool] ||= []
+      context[:color_buffer] ||= []
+      context
+    end
+
+    def trim_color_draw_context
+      context = @color_draw_context
+      return unless context
+
+      pool = context[:color_pool]
+      buffer = context[:color_buffer]
+      max_capacity = DRAW_CHUNK
+
+      if pool && pool.length > max_capacity
+        pool.slice!(max_capacity, pool.length - max_capacity)
+      end
+
+      if buffer && buffer.length > max_capacity
+        buffer.slice!(max_capacity, buffer.length - max_capacity)
       end
     end
 

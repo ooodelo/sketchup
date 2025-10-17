@@ -117,14 +117,14 @@ module PointCloudImporter
       Sketchup.active_model&.active_view
     end
 
-    def draw(view)
+    def draw(view, draw_context = nil)
       Threading.guard(:ui, message: 'Manager#draw')
       clouds_snapshot = clouds
 
       clouds_snapshot.each do |cloud|
         next unless cloud.visible?
 
-        cloud.draw(view)
+        cloud.draw(view, draw_context)
       end
 
       draw_preview_measurement(view)
