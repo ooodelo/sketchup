@@ -105,7 +105,10 @@ module PointCloudImporter
         task = next_ready_task
         break unless task
 
-        break if monotonic_time >= tick_deadline
+        if monotonic_time >= tick_deadline
+          requeue_task(task)
+          break
+        end
 
         handle = TaskHandle.new(self, task[:id])
         quota_deadline = [tick_deadline, monotonic_time + task[:quota]].min
@@ -163,6 +166,16 @@ module PointCloudImporter
         return if task[:cancelled]
 
         task[:run_at] = monotonic_time + [delay.to_f, 0.0].max
+        @tasks << task
+        @task_lookup[task[:id]] = task
+        @tasks_sorted = false
+      end
+    end
+
+    def requeue_task(task)
+      @mutex.synchronize do
+        return if task[:cancelled]
+
         @tasks << task
         @task_lookup[task[:id]] = task
         @tasks_sorted = false
