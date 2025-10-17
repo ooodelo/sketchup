@@ -54,6 +54,7 @@ module PointCloudImporter
         point_count = cloud.points ? cloud.points.length : 0
         "Облако #{cloud.name.inspect} добавлено в менеджер (#{point_count} точек)"
       end
+      log_registered_overlays
       view.invalidate if view
     end
 
@@ -236,6 +237,18 @@ module PointCloudImporter
     end
 
     private
+
+    def log_registered_overlays
+      model = Sketchup.active_model
+      return unless model&.respond_to?(:model_overlays)
+
+      overlays = model.model_overlays.map(&:name)
+      Logger.debug do
+        "Зарегистрированные overlays: #{overlays.inspect}"
+      end
+    rescue StandardError => e
+      Logger.debug { "Не удалось получить список overlays: #{e.class}: #{e.message}" }
+    end
 
     def warn_unless_disposed(cloud)
       return if cloud.disposed?
