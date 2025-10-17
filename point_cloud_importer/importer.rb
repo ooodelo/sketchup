@@ -118,11 +118,43 @@ module PointCloudImporter
           invalidate_every_n_chunks = if config
                                          config.sanitize_invalidate_every_n_chunks(invalidate_source)
                                        else
-                                        value = invalidate_source || default_invalidation
-                                        value = value.to_i
-                                        value = 1 if value < 1
-                                        value
-                                      end
+                                         value = invalidate_source || default_invalidation
+                                         value = value.to_i
+                                         value = 1 if value < 1
+                                         value
+                                       end
+
+          default_buffer_size = config&.binary_buffer_size || PlyParser::BINARY_READ_BUFFER_SIZE
+          buffer_source = job.options[:binary_buffer_size] ||
+                          settings[:binary_buffer_size] ||
+                          default_buffer_size
+          buffer_size = if config
+                           config.sanitize_binary_buffer_size(buffer_source)
+                         else
+                           value = buffer_source || default_buffer_size
+                           value = value.to_i
+                           value = default_buffer_size if value < 1
+                           value
+                         end
+
+          default_batch_size = config&.binary_vertex_batch_size ||
+                                PlyParser::DEFAULT_BINARY_VERTEX_BATCH_SIZE
+          batch_source = job.options[:binary_vertex_batch_size] ||
+                         settings[:binary_vertex_batch_size] ||
+                         default_batch_size
+          batch_size_preference = if config
+                                     config.sanitize_binary_vertex_batch_size(batch_source)
+                                   else
+                                     value = batch_source || default_batch_size
+                                     value = value.to_i
+                                     value = default_batch_size if value < 1
+                                     value
+                                   end
+          if batch_size_preference < PlyParser::BINARY_VERTEX_BATCH_MIN
+            batch_size_preference = PlyParser::BINARY_VERTEX_BATCH_MIN
+          elsif batch_size_preference > PlyParser::BINARY_VERTEX_BATCH_MAX
+            batch_size_preference = PlyParser::BINARY_VERTEX_BATCH_MAX
+          end
 
           Logger.debug do
             format(
