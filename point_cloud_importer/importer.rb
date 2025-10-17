@@ -9,6 +9,7 @@ require_relative 'point_cloud'
 require_relative 'ply_parser'
 require_relative 'import_job'
 require_relative 'logger'
+require_relative 'main_thread_queue'
 require_relative 'ui/import_progress_dialog'
 
 module PointCloudImporter
@@ -363,225 +364,8 @@ module PointCloudImporter
       progress_dialog = UI::ImportProgressDialog.new(job) { job.cancel! }
       progress_dialog.show
 
-      message_queue = SizedQueue.new(16)
-      worker_finished = false
-      worker = Thread.new do
-        Thread.current.abort_on_exception = false
-        begin
-          job.start!
-          job.update_progress(processed_vertices: 0, message: 'Чтение PLY...')
-          start_time = Time.now
-          parser = PlyParser.new(
-            job.path,
-            progress_callback: job.progress_callback,
-            cancelled_callback: -> { job.cancel_requested? }
-          )
-
-          point_unit = job.options[:point_unit] || job.options[:detected_point_unit]
-          sketchup_unit = job.options[:sketchup_unit]
-          unit_scale = sanitized_unit_scale(job.options[:unit_scale])
-          Logger.debug do
-            format(
-              'Импорт: коэффициент масштабирования координат %.6f (облако=%s, SketchUp=%s)',
-              unit_scale,
-              point_unit || :auto,
-              sketchup_unit || :model
-            )
-          end
-
-          job.update_progress(
-            processed_vertices: 0,
-            total_vertices: parser.total_vertex_count,
-            total_bytes: parser.progress_estimator.total_bytes,
-            message: 'Чтение PLY...'
-          )
-
-          name = File.basename(job.path, '.*')
-          settings = Settings.instance
-          config = defined?(PointCloudImporter::Config) ? PointCloudImporter::Config : nil
-
-          default_chunk_size = config&.chunk_size || 1_000_000
-          chunk_size_source = job.options[:chunk_size] || settings[:import_chunk_size] || default_chunk_size
-          chunk_size = if config
-                         config.sanitize_chunk_size(chunk_size_source)
-                       else
-                         value = chunk_size_source || default_chunk_size
-                         value = value.to_i
-                         value = 1 if value < 1
-                         value
-                       end
-
-          default_invalidation = config&.invalidate_every_n_chunks || 1
-          invalidate_source = job.options[:invalidate_every_n_chunks] ||
-                              settings[:invalidate_every_n_chunks] ||
-                              default_invalidation
-          invalidate_every_n_chunks = if config
-                                         config.sanitize_invalidate_every_n_chunks(invalidate_source)
-                                       else
-                                        value = invalidate_source || default_invalidation
-                                        value = value.to_i
-                                        value = 1 if value < 1
-                                        value
-                                      end
-
-          default_buffer_size = config&.binary_buffer_size || settings[:binary_buffer_size] ||
-                                PlyParser::BINARY_READ_BUFFER_SIZE
-          buffer_source = job.options[:binary_buffer_size]
-          buffer_source = settings[:binary_buffer_size] if buffer_source.nil?
-          buffer_size = if config
-                          config.sanitize_binary_buffer_size(buffer_source || default_buffer_size)
-                        else
-                          sanitize_positive_integer(buffer_source, default_buffer_size)
-                        end
-
-          default_batch_size = config&.binary_vertex_batch_size || settings[:binary_vertex_batch_size] ||
-                               PlyParser::DEFAULT_BINARY_VERTEX_BATCH_SIZE
-          batch_source = job.options[:binary_vertex_batch_size]
-          batch_source = settings[:binary_vertex_batch_size] if batch_source.nil?
-          batch_size_preference = if config
-                                     config.sanitize_binary_vertex_batch_size(batch_source || default_batch_size)
-                                   else
-                                     sanitize_positive_integer(batch_source, default_batch_size)
-                                   end
-          batch_size_preference = clamp(batch_size_preference,
-                                        PlyParser::BINARY_VERTEX_BATCH_MIN,
-                                        PlyParser::BINARY_VERTEX_BATCH_MAX)
-
-          Logger.debug do
-            format(
-              'Импорт: chunk_size=%<chunk>d, binary_buffer=%<buffer>s, vertex_batch=%<batch>d, invalidate_every=%<invalidate>d',
-              chunk: chunk_size,
-              buffer: format_memory(buffer_size),
-              batch: batch_size_preference,
-              invalidate: invalidate_every_n_chunks
-            )
-          end
-
-          message_queue << [
-            :create_cloud,
-            {
-              name: name,
-              metadata: parser.metadata || {},
-              invalidate_every_n_chunks: invalidate_every_n_chunks,
-              start_time: start_time,
-              chunk_size: chunk_size,
-              binary_buffer_size: buffer_size,
-              binary_vertex_batch_size: batch_size_preference,
-              unit_scale: unit_scale,
-              point_unit: point_unit,
-              sketchup_unit: sketchup_unit,
-              detected_point_unit: job.options[:detected_point_unit]
-            }
-          ]
-
-          chunks_processed = 0
-          accumulated_points = nil
-          accumulated_colors = nil
-          accumulated_intensities = nil
-          accumulated_count = 0
-          accumulation_started_at = nil
-
-          flush_accumulated = lambda do
-            return unless accumulated_points && !accumulated_points.empty?
-
-            colors_payload = accumulated_colors
-            colors_payload = nil if colors_payload.is_a?(Array) && colors_payload.empty?
-            intensities_payload = accumulated_intensities
-            intensities_payload = nil if intensities_payload.is_a?(Array) && intensities_payload.empty?
-
-            message_queue << [
-              :append_chunk,
-              {
-                points: accumulated_points,
-                colors: colors_payload,
-                intensities: intensities_payload
-              }
-            ]
-
-            accumulated_points = nil
-            accumulated_colors = nil
-            accumulated_intensities = nil
-            accumulated_count = 0
-            accumulation_started_at = nil
-            chunks_processed += 1
-          end
-          parsing_started_at = metrics_enabled_flag ? Time.now : nil
-          metadata = parser.parse(chunk_size: chunk_size) do |points_chunk, colors_chunk, intensities_chunk, processed|
-            break if job.cancel_requested? || job.finished?
-            next unless points_chunk && !points_chunk.empty?
-
-            scale_points!(points_chunk, unit_scale) if unit_scale != 1.0
-
-          if accumulated_points
-            accumulated_points.concat(points_chunk)
-          else
-            accumulated_points = points_chunk
-            accumulation_started_at = monotonic_time
-          end
-
-          if colors_chunk && !colors_chunk.empty?
-            if accumulated_colors
-              accumulated_colors.concat(colors_chunk)
-            else
-              accumulated_colors = colors_chunk
-            end
-          end
-
-          if intensities_chunk && !intensities_chunk.empty?
-            if accumulated_intensities
-              accumulated_intensities.concat(intensities_chunk)
-            else
-              accumulated_intensities = intensities_chunk
-            end
-          end
-
-          accumulated_count += points_chunk.length
-
-          now = monotonic_time
-          if accumulated_count >= chunk_size || (accumulation_started_at && now - accumulation_started_at >= ACCUMULATED_CHUNK_MAX_INTERVAL)
-            flush_accumulated.call
-          end
-
-          total_vertices = parser.total_vertex_count.to_i
-          total_vertices = processed if total_vertices.zero? || total_vertices < processed
-          job.update_progress(
-            processed_vertices: processed,
-            total_vertices: total_vertices,
-            message: format_progress_message(processed, total_vertices)
-          )
-          end
-
-          flush_accumulated.call
-
-          parsing_finished_at = metrics_enabled_flag ? Time.now : nil
-
-          if job.cancel_requested?
-            job.mark_cancelled!
-          elsif job.finished?
-            # Job already finished by the main thread (likely due to an error)
-          else
-            message_queue << [
-              :finalize_cloud,
-              {
-                metadata: metadata || parser.metadata,
-                total_vertices: parser.total_vertex_count.to_i,
-                parsing_started_at: parsing_started_at,
-                parsing_finished_at: parsing_finished_at
-              }
-            ]
-          end
-        rescue PlyParser::Cancelled
-          job.mark_cancelled!
-        rescue PlyParser::UnsupportedFormat => e
-          job.fail!(e)
-        rescue StandardError => e
-          job.fail!(e)
-        ensure
-          message_queue << [:worker_finished, nil]
-        end
-      end
-
-      job.thread = worker
+      job.on_progress { MainThreadDispatcher.enqueue { progress_dialog.update } }
+      job.on_state_change { MainThreadDispatcher.enqueue { progress_dialog.update } }
 
       cloud_context = {
         cloud: nil,
@@ -598,17 +382,23 @@ module PointCloudImporter
         detected_point_unit: nil
       }
 
-      process_messages = lambda do |limit = nil|
-        processed = 0
-        loop do
-          break if limit && processed >= limit
+      worker_finished = false
+      progress_dialog_closed = false
 
-          message, payload = message_queue.pop(true)
-          processed += 1
-          begin
-            case message
+      finalize_if_ready = lambda do
+        return unless worker_finished && job.finished?
+        return if progress_dialog_closed
+
+        progress_dialog_closed = true
+        progress_dialog.close
+        finalize_job(job)
+      end
+
+      handle_message = lambda do |message, payload|
+        begin
+          case message
           when :create_cloud
-            next if job.cancel_requested? || job.finished?
+            return if job.cancel_requested? || job.finished?
 
             cloud = PointCloud.new(name: payload[:name], metadata: payload[:metadata] || {})
             job.cloud = cloud
@@ -634,10 +424,10 @@ module PointCloudImporter
             cloud_context[:sketchup_unit] = payload[:sketchup_unit]
             cloud_context[:detected_point_unit] = payload[:detected_point_unit]
           when :append_chunk
-            next if job.cancel_requested? || job.finished?
+            return if job.cancel_requested? || job.finished?
 
             cloud = cloud_context[:cloud]
-            next unless cloud
+            return unless cloud
 
             append_started_at = metrics_enabled_flag ? Time.now : nil
             cloud.append_points!(payload[:points], payload[:colors], payload[:intensities])
@@ -653,15 +443,16 @@ module PointCloudImporter
               log_invalidation_metrics(cloud_context) if invalidated
             end
           when :finalize_cloud
-            next if job.finished?
+            return if job.finished?
 
             if job.cancel_requested?
               job.mark_cancelled!
-              next
+              finalize_if_ready.call
+              return
             end
 
             cloud = cloud_context[:cloud]
-            next unless cloud
+            return unless cloud
 
             cloud.finalize_bounds!
 
@@ -713,6 +504,8 @@ module PointCloudImporter
             total_vertices = cloud.points.length if total_vertices.zero?
             start_time = cloud_context[:start_time]
             total_duration = start_time ? completion_time - start_time : nil
+
+            job.transition_to(:register)
             job.complete!(
               cloud: cloud,
               metadata: metadata,
@@ -731,34 +524,247 @@ module PointCloudImporter
               binary_vertex_batch_size: cloud_context[:binary_vertex_batch_size],
               invalidate_every: cloud_context[:invalidate_every_n_chunks]
             )
+
+            finalize_if_ready.call
           when :worker_finished
             worker_finished = true
-          else
-            # Ignore unknown messages
+            finalize_if_ready.call
           end
-          rescue StandardError => e
-            unless job.finished?
-              job.fail!(e)
-            end
+        rescue StandardError => e
+          unless job.finished?
+            job.fail!(e)
           end
-        rescue ThreadError
-          break
+          finalize_if_ready.call
         end
       end
 
-      timer_id = nil
-      timer_id = ::UI.start_timer(0.1, repeat: true) do
-        progress_dialog.update
-        process_messages.call(10)
-
-        next unless worker_finished && job.finished?
-
-        ::UI.stop_timer(timer_id) if timer_id
-        progress_dialog.close
-        process_messages.call while !message_queue.empty?
-        job.thread&.join
-        finalize_job(job)
+      dispatch = lambda do |message, payload = nil|
+        MainThreadDispatcher.enqueue { handle_message.call(message, payload) }
       end
+
+      worker = Thread.new do
+        Thread.current.abort_on_exception = false
+        begin
+          job.start!
+          job.transition_async(:parsing)
+          job.update_progress(processed_vertices: 0, message: 'Чтение PLY...')
+          start_time = Time.now
+          parser = PlyParser.new(
+            job.path,
+            progress_callback: job.progress_callback,
+            cancelled_callback: -> { job.cancel_requested? }
+          )
+
+          point_unit = job.options[:point_unit] || job.options[:detected_point_unit]
+          sketchup_unit = job.options[:sketchup_unit]
+          unit_scale = sanitized_unit_scale(job.options[:unit_scale])
+          Logger.debug do
+            format(
+              'Импорт: коэффициент масштабирования координат %.6f (облако=%s, SketchUp=%s)',
+              unit_scale,
+              point_unit || :auto,
+              sketchup_unit || :model
+            )
+          end
+
+          job.update_progress(
+            processed_vertices: 0,
+            total_vertices: parser.total_vertex_count,
+            total_bytes: parser.progress_estimator.total_bytes,
+            message: 'Чтение PLY...'
+          )
+
+          name = File.basename(job.path, '.*')
+          settings = Settings.instance
+          config = defined?(PointCloudImporter::Config) ? PointCloudImporter::Config : nil
+
+          default_chunk_size = config&.chunk_size || 1_000_000
+          chunk_size_source = job.options[:chunk_size] || settings[:import_chunk_size] || default_chunk_size
+          chunk_size = if config
+                         config.sanitize_chunk_size(chunk_size_source)
+                       else
+                         value = chunk_size_source || default_chunk_size
+                         value = value.to_i
+                         value = 1 if value < 1
+                         value
+                       end
+
+          default_invalidation = config&.invalidate_every_n_chunks || 1
+          invalidate_source = job.options[:invalidate_every_n_chunks] ||
+                              settings[:invalidate_every_n_chunks] ||
+                              default_invalidation
+          invalidate_every_n_chunks = if config
+                                         config.sanitize_invalidate_every_n_chunks(invalidate_source)
+                                       else
+                                         value = invalidate_source || default_invalidation
+                                         value = value.to_i
+                                         value = 1 if value < 1
+                                         value
+                                       end
+
+          default_buffer_size = config&.binary_buffer_size || settings[:binary_buffer_size] ||
+                                PlyParser::BINARY_READ_BUFFER_SIZE
+          buffer_source = job.options[:binary_buffer_size]
+          buffer_source = settings[:binary_buffer_size] if buffer_source.nil?
+          buffer_size = if config
+                          config.sanitize_binary_buffer_size(buffer_source || default_buffer_size)
+                        else
+                          sanitize_positive_integer(buffer_source, default_buffer_size)
+                        end
+
+          default_batch_size = config&.binary_vertex_batch_size || settings[:binary_vertex_batch_size] ||
+                               PlyParser::DEFAULT_BINARY_VERTEX_BATCH_SIZE
+          batch_source = job.options[:binary_vertex_batch_size]
+          batch_source = settings[:binary_vertex_batch_size] if batch_source.nil?
+          batch_size_preference = if config
+                                     config.sanitize_binary_vertex_batch_size(batch_source || default_batch_size)
+                                   else
+                                     sanitize_positive_integer(batch_source, default_batch_size)
+                                   end
+          batch_size_preference = clamp(batch_size_preference,
+                                        PlyParser::BINARY_VERTEX_BATCH_MIN,
+                                        PlyParser::BINARY_VERTEX_BATCH_MAX)
+
+          Logger.debug do
+            format(
+              'Импорт: chunk_size=%<chunk>d, binary_buffer=%<buffer>s, vertex_batch=%<batch>d, invalidate_every=%<invalidate>d',
+              chunk: chunk_size,
+              buffer: format_memory(buffer_size),
+              batch: batch_size_preference,
+              invalidate: invalidate_every_n_chunks
+            )
+          end
+
+          dispatch.call(
+            :create_cloud,
+            {
+              name: name,
+              metadata: parser.metadata || {},
+              invalidate_every_n_chunks: invalidate_every_n_chunks,
+              start_time: start_time,
+              chunk_size: chunk_size,
+              binary_buffer_size: buffer_size,
+              binary_vertex_batch_size: batch_size_preference,
+              unit_scale: unit_scale,
+              point_unit: point_unit,
+              sketchup_unit: sketchup_unit,
+              detected_point_unit: job.options[:detected_point_unit]
+            }
+          )
+
+          chunks_processed = 0
+          accumulated_points = nil
+          accumulated_colors = nil
+          accumulated_intensities = nil
+          accumulated_count = 0
+          accumulation_started_at = nil
+
+          flush_accumulated = lambda do
+            return unless accumulated_points && !accumulated_points.empty?
+
+            colors_payload = accumulated_colors
+            colors_payload = nil if colors_payload.is_a?(Array) && colors_payload.empty?
+            intensities_payload = accumulated_intensities
+            intensities_payload = nil if intensities_payload.is_a?(Array) && intensities_payload.empty?
+
+            dispatch.call(
+              :append_chunk,
+              {
+                points: accumulated_points,
+                colors: colors_payload,
+                intensities: intensities_payload
+              }
+            )
+
+            accumulated_points = nil
+            accumulated_colors = nil
+            accumulated_intensities = nil
+            accumulated_count = 0
+            accumulation_started_at = nil
+            chunks_processed += 1
+          end
+          parsing_started_at = metrics_enabled_flag ? Time.now : nil
+          metadata = parser.parse(chunk_size: chunk_size) do |points_chunk, colors_chunk, intensities_chunk, processed|
+            break if job.cancel_requested? || job.finished?
+            job.ensure_state_fresh!
+            next unless points_chunk && !points_chunk.empty?
+
+            scale_points!(points_chunk, unit_scale) if unit_scale != 1.0
+
+            if accumulated_points
+              accumulated_points.concat(points_chunk)
+            else
+              accumulated_points = points_chunk
+              accumulation_started_at = monotonic_time
+            end
+
+            if colors_chunk && !colors_chunk.empty?
+              if accumulated_colors
+                accumulated_colors.concat(colors_chunk)
+              else
+                accumulated_colors = colors_chunk
+              end
+            end
+
+            if intensities_chunk && !intensities_chunk.empty?
+              if accumulated_intensities
+                accumulated_intensities.concat(intensities_chunk)
+              else
+                accumulated_intensities = intensities_chunk
+              end
+            end
+
+            accumulated_count += points_chunk.length
+
+            now = monotonic_time
+            if accumulated_count >= chunk_size || (accumulation_started_at && now - accumulation_started_at >= ACCUMULATED_CHUNK_MAX_INTERVAL)
+              flush_accumulated.call
+            end
+
+            total_vertices = parser.total_vertex_count.to_i
+            total_vertices = processed if total_vertices.zero? || total_vertices < processed
+            job.update_progress(
+              processed_vertices: processed,
+              total_vertices: total_vertices,
+              message: format_progress_message(processed, total_vertices)
+            )
+          end
+
+          flush_accumulated.call
+
+          parsing_finished_at = metrics_enabled_flag ? Time.now : nil
+
+          if job.cancel_requested?
+            job.mark_cancelled!
+          elsif job.finished?
+            # already handled
+          else
+            job.transition_async(:sampling)
+            job.transition_async(:build_index)
+            dispatch.call(
+              :finalize_cloud,
+              {
+                metadata: metadata || parser.metadata,
+                total_vertices: parser.total_vertex_count.to_i,
+                parsing_started_at: parsing_started_at,
+                parsing_finished_at: parsing_finished_at
+              }
+            )
+          end
+        rescue PlyParser::Cancelled
+          job.mark_cancelled!
+        rescue PlyParser::UnsupportedFormat => e
+          job.fail!(e)
+        rescue ImportJob::TimeoutError => e
+          job.fail!(e)
+        rescue StandardError => e
+          job.fail!(e)
+        ensure
+          dispatch.call(:worker_finished)
+        end
+      end
+
+      job.thread = worker
     end
 
     def finalize_job(job)
