@@ -5,14 +5,53 @@ require 'thread'
 
 require_relative 'logger'
 require_relative 'progress_estimator'
+require_relative 'main_thread_queue'
 
 module PointCloudImporter
   # Represents a background import job with shared state between threads.
   class ImportJob
     MIN_PROGRESS_INTERVAL = 0.5
 
+    class TimeoutError < StandardError; end
+
+    class CancellationToken
+      def initialize
+        @cancelled = false
+        @mutex = Mutex.new
+      end
+
+      def cancel!
+        @mutex.synchronize { @cancelled = true }
+      end
+
+      def cancelled?
+        @mutex.synchronize { @cancelled }
+      end
+    end
+
+    STATES = %i[init parsing sampling build_index register ready cancelled failed].freeze
+
+    STATE_TRANSITIONS = {
+      init: %i[parsing cancelled failed],
+      parsing: %i[sampling cancelled failed],
+      sampling: %i[build_index cancelled failed],
+      build_index: %i[register cancelled failed],
+      register: %i[ready cancelled failed],
+      ready: %i[cancelled failed],
+      cancelled: [],
+      failed: []
+    }.freeze
+
+    STATE_TIMEOUTS = {
+      parsing: 120.0,
+      sampling: 60.0,
+      build_index: 120.0,
+      register: 30.0
+    }.freeze
+
     attr_reader :path, :options
     attr_accessor :thread
+    attr_reader :state, :cancellation_token
 
     def initialize(path, options = {})
       @path = path
@@ -29,6 +68,12 @@ module PointCloudImporter
       @last_progress_time = monotonic_time - MIN_PROGRESS_INTERVAL
       @processed_vertices = 0
       @progress_estimator = ProgressEstimator.new
+      @state = :init
+      @state_entered_at = monotonic_time
+      @state_deadline = compute_deadline(:init)
+      @progress_listeners = []
+      @state_listeners = []
+      @cancellation_token = CancellationToken.new
       Logger.debug { "Создано задание импорта для #{path.inspect}" }
     end
 
@@ -47,15 +92,17 @@ module PointCloudImporter
         @cancel_requested = true
         @status = :cancelling if @status == :running
         @message = 'Отмена...'
+        @cancellation_token.cancel!
       end
       Logger.debug('Получен запрос на отмену импорта')
     end
 
     def cancel_requested?
-      @mutex.synchronize { @cancel_requested }
+      @mutex.synchronize { @cancel_requested || @cancellation_token.cancelled? }
     end
 
     def mark_cancelled!
+      transition_to(:cancelled)
       @mutex.synchronize do
         @cancel_requested = true
         @status = :cancelled
@@ -66,6 +113,7 @@ module PointCloudImporter
     end
 
     def fail!(error)
+      transition_to(:failed, reason: error)
       @mutex.synchronize do
         @status = :failed
         @error = error
@@ -75,6 +123,7 @@ module PointCloudImporter
     end
 
     def complete!(result)
+      transition_to(:ready)
       @mutex.synchronize do
         @status = :completed
         @result = result
@@ -161,8 +210,10 @@ module PointCloudImporter
 
       now = monotonic_time
 
+      listeners = nil
+      updated = false
       @mutex.synchronize do
-        return if finished_locked?
+        return false if finished_locked?
 
         @progress_estimator.update_totals(
           total_vertices: total_vertices,
@@ -198,14 +249,18 @@ module PointCloudImporter
             )
           end
           @processed_vertices = [processed_vertices.to_i, @processed_vertices].max if processed_vertices
-          return
+          return false
         end
 
         @processed_vertices = [processed_vertices.to_i, @processed_vertices].max if processed_vertices
         @progress = clamped_fraction unless clamped_fraction.nil?
         @message = message if message
         @last_progress_time = now
+        listeners = @progress_listeners.dup
+        updated = true
       end
+      notify_listeners(listeners)
+      updated
     end
 
     def progress_callback
@@ -214,7 +269,100 @@ module PointCloudImporter
       end
     end
 
+    def on_progress(&block)
+      return unless block
+
+      @mutex.synchronize do
+        @progress_listeners << block
+      end
+    end
+
+    def on_state_change(&block)
+      return unless block
+
+      @mutex.synchronize do
+        @state_listeners << block
+      end
+    end
+
+    def transition_async(state, reason: nil)
+      MainThreadDispatcher.enqueue { transition_to(state, reason: reason) }
+    end
+
+    def transition_to(state, reason: nil)
+      listeners = nil
+      previous = nil
+      deadline = nil
+      timestamp = monotonic_time
+
+      @mutex.synchronize do
+        validate_state!(state)
+        return @state if @state == state
+
+        unless STATE_TRANSITIONS.fetch(@state).include?(state)
+          raise ArgumentError, format('Недопустимый переход из %<from>s в %<to>s', from: @state, to: state)
+        end
+
+        previous = @state
+        @state = state
+        @state_entered_at = timestamp
+        deadline = compute_deadline(state)
+        @state_deadline = deadline
+        listeners = @state_listeners.dup
+      end
+
+      Logger.debug do
+        details = ["Переход задания #{path.inspect} из состояния #{previous} в #{state}"]
+        details << "причина: #{reason}" if reason
+        details << format('тайм-аут: %.1f c', deadline) if deadline
+        details.join(', ')
+      end
+
+      notify_listeners(listeners)
+      state
+    rescue ArgumentError => e
+      Logger.debug { "Сбой перехода состояния: #{e.message}" }
+      state
+    end
+
+    def ensure_state_fresh!
+      deadline = nil
+      current_state = nil
+      @mutex.synchronize do
+        deadline = @state_deadline
+        current_state = @state
+      end
+
+      return if deadline.nil?
+      return if monotonic_time <= deadline
+
+      raise TimeoutError, "Превышено время для состояния #{current_state}"
+    end
+
     private
+
+    def notify_listeners(listeners)
+      Array(listeners).each do |listener|
+        begin
+          listener.call(self)
+        rescue StandardError => e
+          Logger.debug { "Обработчик уведомлений завершился с ошибкой: #{e.class}: #{e.message}" }
+        end
+      end
+    end
+
+    def compute_deadline(state)
+      timeout = STATE_TIMEOUTS[state]
+      return nil unless timeout && timeout.positive?
+
+      monotonic_time + timeout
+    end
+
+    def validate_state!(state)
+      return if STATES.include?(state)
+
+      raise ArgumentError, "Неизвестное состояние #{state.inspect}"
+    end
 
     def finished_locked?
       %i[completed failed cancelled].include?(@status)
