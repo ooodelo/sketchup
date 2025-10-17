@@ -36,6 +36,38 @@ module PointCloudImporter
       7 => 63_360.0 # Miles
     }.freeze
 
+    UNIT_DEFINITIONS = [
+      { key: :inch, label: 'Дюймы (in)', scale: 1.0, su_codes: [0] },
+      { key: :foot, label: 'Футы (ft)', scale: 12.0, su_codes: [1] },
+      { key: :millimeter, label: 'Миллиметры (mm)', scale: MM_TO_INCH, su_codes: [2] },
+      { key: :centimeter, label: 'Сантиметры (cm)', scale: MM_TO_INCH * 10.0, su_codes: [3] },
+      { key: :meter, label: 'Метры (m)', scale: MM_TO_INCH * 1_000.0, su_codes: [4] },
+      { key: :kilometer, label: 'Километры (km)', scale: MM_TO_INCH * 1_000_000.0, su_codes: [5] },
+      { key: :yard, label: 'Ярды (yd)', scale: 36.0, su_codes: [6] },
+      { key: :mile, label: 'Мили (mi)', scale: 63_360.0, su_codes: [7] }
+    ].map(&:freeze).freeze
+
+    UNIT_DEFINITIONS_BY_KEY = UNIT_DEFINITIONS.each_with_object({}) do |definition, memo|
+      memo[definition[:key]] = definition
+    end.freeze
+
+    UNIT_DEFINITIONS_BY_SU_CODE = UNIT_DEFINITIONS.each_with_object({}) do |definition, memo|
+      next unless definition[:su_codes]
+
+      definition[:su_codes].each { |code| memo[code] = definition }
+    end.freeze
+
+    UNIT_SYNONYMS = {
+      inch: %w[in inch inches дюйм дюймы],
+      foot: %w[ft foot feet фут футы],
+      millimeter: %w[mm millimeter millimeters миллиметр миллиметры мм],
+      centimeter: %w[cm centimeter centimetre centimeters centimetres сантиметр сантиметры см],
+      meter: %w[m meter metre meters metres метр метры м],
+      kilometer: %w[km kilometer kilometre kilometers kilometres километр километры км],
+      yard: %w[yd yard yards ярд ярды],
+      mile: %w[mi mile miles миля мили]
+    }.freeze
+
     def initialize(manager)
       @manager = manager
       @last_result = nil
@@ -46,10 +78,13 @@ module PointCloudImporter
       path = ::UI.openpanel('Выберите файл облака точек', nil, 'PLY (*.ply)|*.ply||')
       return unless path
 
+      unit_options = prompt_unit_selection(path)
+      return unless unit_options
+
       options = prompt_options
       return unless options
 
-      import(path, options)
+      import(path, options.merge(unit_options))
     end
 
     def import(path, options = {})
@@ -88,6 +123,43 @@ module PointCloudImporter
       nil
     end
 
+    def unit_definition_for_key(key)
+      UNIT_DEFINITIONS_BY_KEY[key]
+    end
+
+    def unit_label_for(key)
+      unit_definition_for_key(key)&.dig(:label)
+    end
+
+    def unit_scale_for(key)
+      unit_definition_for_key(key)&.dig(:scale)
+    end
+
+    def model_unit_definition
+      unit_value = model_length_unit_value
+      return nil unless unit_value
+
+      UNIT_DEFINITIONS_BY_SU_CODE[unit_value]
+    end
+
+    def model_length_unit_value
+      return nil unless defined?(Sketchup) && Sketchup.respond_to?(:active_model)
+
+      model = Sketchup.active_model
+      return nil unless model
+
+      units_options = fetch_units_options(model)
+      return nil unless units_options
+
+      unit_value = begin
+        units_options['LengthUnit']
+      rescue StandardError
+        nil
+      end
+
+      unit_value.respond_to?(:to_i) ? unit_value.to_i : unit_value
+    end
+
     def model_unit_scale
       return DEFAULT_UNIT_SCALE unless defined?(Sketchup) && Sketchup.respond_to?(:active_model)
 
@@ -117,6 +189,133 @@ module PointCloudImporter
 
       options['UnitsOptions']
     rescue StandardError
+      nil
+    end
+
+    def prompt_unit_selection(path)
+      return {} unless defined?(::UI) && ::UI.respond_to?(:inputbox)
+
+      detected_unit = detect_point_cloud_unit(path)
+      model_definition = model_unit_definition
+      model_label = model_definition ? model_definition[:label] : unit_label_for(:inch)
+      model_option_label = "Текущие настройки модели (#{model_label})"
+
+      source_options_map = { 'Определить автоматически' => :auto }
+      UNIT_DEFINITIONS.each { |definition| source_options_map[definition[:label]] = definition[:key] }
+
+      target_options_map = { model_option_label => :model }
+      UNIT_DEFINITIONS.each { |definition| target_options_map[definition[:label]] = definition[:key] }
+
+      source_default_label = detected_unit ? unit_label_for(detected_unit) : source_options_map.keys.first
+      target_default_label = model_option_label
+
+      prompts = ['Единицы облака точек', 'Единицы модели SketchUp']
+      defaults = [source_default_label, target_default_label]
+      lists = [source_options_map.keys.join('|'), target_options_map.keys.join('|')]
+
+      selection = ::UI.inputbox(prompts, defaults, lists, 'Настройки единиц и масштаба')
+      return unless selection
+
+      source_label, target_label = selection
+      source_key = source_options_map[source_label] || :auto
+      target_key = target_options_map[target_label] || :model
+
+      selected_source_key = source_key == :auto ? nil : source_key
+      selected_target_key = target_key == :model ? nil : target_key
+
+      scale = unit_scale_for(selected_source_key)
+      scale ||= unit_scale_for(selected_target_key)
+
+      Logger.debug do
+        format(
+          'Выбраны единицы: облако=%<source>s, SketchUp=%<target>s, коэффициент=%<scale>.6f',
+          source: selected_source_key || :auto,
+          target: selected_target_key || :model,
+          scale: scale || 0.0
+        )
+      end
+
+      {
+        unit_scale: scale,
+        point_unit: selected_source_key,
+        sketchup_unit: selected_target_key,
+        detected_point_unit: detected_unit
+      }
+    rescue StandardError => e
+      Logger.debug { "Не удалось запросить единицы: #{e.class}: #{e.message}" }
+      {}
+    end
+
+    def detect_point_cloud_unit(path)
+      return nil unless path && File.file?(path)
+
+      header_strings = extract_ply_header_metadata(path)
+      return nil if header_strings.empty?
+
+      detect_unit_from_strings(header_strings)
+    rescue StandardError => e
+      Logger.debug { "Не удалось определить единицы облака: #{e.class}: #{e.message}" }
+      nil
+    end
+
+    def extract_ply_header_metadata(path)
+      strings = []
+
+      File.open(path, 'rb') do |io|
+        first_line = io.gets
+        return strings unless first_line && first_line.strip.casecmp('ply').zero?
+
+        until (line = io.gets).nil?
+          stripped = line.strip
+          break if stripped.casecmp('end_header').zero?
+
+          case stripped
+          when /^comment\s+(.*)$/i
+            strings << sanitize_header_string(Regexp.last_match(1))
+          when /^obj_info\s+(.*)$/i
+            strings << sanitize_header_string(Regexp.last_match(1))
+          end
+        end
+      end
+
+      strings
+    rescue StandardError
+      []
+    end
+
+    def sanitize_header_string(value)
+      return '' if value.nil?
+
+      value = value.to_s
+      value = value.dup.force_encoding('UTF-8') if value.encoding != Encoding::UTF_8
+      value.encode('UTF-8', invalid: :replace, undef: :replace, replace: '').strip
+    rescue StandardError
+      value.to_s.strip
+    end
+
+    def detect_unit_from_strings(strings)
+      strings.each do |raw|
+        normalized = raw.to_s.downcase
+        next unless normalized.include?('unit') || normalized.include?('scale')
+
+        UNIT_SYNONYMS.each do |key, synonyms|
+          synonyms.each do |synonym|
+            pattern = /\b#{Regexp.escape(synonym)}s?\b/
+            return key if normalized.match?(pattern)
+          end
+        end
+
+        if (match = normalized.match(/scale\s*[:=]\s*([\d.eE+-]+)/))
+          value = match[1].to_f
+          detected = UNIT_DEFINITIONS.min_by do |definition|
+            (definition[:scale] - value).abs
+          end
+          if detected && (detected[:scale] - value).abs <= detected[:scale] * 0.05
+            return detected[:key]
+          end
+        end
+      end
+
       nil
     end
 
@@ -178,9 +377,16 @@ module PointCloudImporter
             cancelled_callback: -> { job.cancel_requested? }
           )
 
+          point_unit = job.options[:point_unit] || job.options[:detected_point_unit]
+          sketchup_unit = job.options[:sketchup_unit]
           unit_scale = sanitized_unit_scale(job.options[:unit_scale])
           Logger.debug do
-            format('Импорт: коэффициент масштабирования координат %.6f', unit_scale)
+            format(
+              'Импорт: коэффициент масштабирования координат %.6f (облако=%s, SketchUp=%s)',
+              unit_scale,
+              point_unit || :auto,
+              sketchup_unit || :model
+            )
           end
 
           job.update_progress(
@@ -261,7 +467,10 @@ module PointCloudImporter
               chunk_size: chunk_size,
               binary_buffer_size: buffer_size,
               binary_vertex_batch_size: batch_size_preference,
-              unit_scale: unit_scale
+              unit_scale: unit_scale,
+              point_unit: point_unit,
+              sketchup_unit: sketchup_unit,
+              detected_point_unit: job.options[:detected_point_unit]
             }
           ]
 
@@ -383,7 +592,10 @@ module PointCloudImporter
         binary_buffer_size: nil,
         binary_vertex_batch_size: nil,
         last_invalidation_log_time: nil,
-        last_invalidation_chunk: 0
+        last_invalidation_chunk: 0,
+        point_unit: nil,
+        sketchup_unit: nil,
+        detected_point_unit: nil
       }
 
       process_messages = lambda do |limit = nil|
@@ -418,6 +630,9 @@ module PointCloudImporter
             cloud_context[:binary_buffer_size] = payload[:binary_buffer_size]
             cloud_context[:binary_vertex_batch_size] = payload[:binary_vertex_batch_size]
             cloud_context[:unit_scale] = sanitized_unit_scale(payload[:unit_scale])
+            cloud_context[:point_unit] = payload[:point_unit]
+            cloud_context[:sketchup_unit] = payload[:sketchup_unit]
+            cloud_context[:detected_point_unit] = payload[:detected_point_unit]
           when :append_chunk
             next if job.cancel_requested? || job.finished?
 
@@ -452,12 +667,13 @@ module PointCloudImporter
 
             metadata = (payload[:metadata] || {}).dup
             unit_scale = cloud_context[:unit_scale]
-            if unit_scale && (unit_scale - 1.0).abs >= Float::EPSILON
-              importer_metadata = metadata['point_cloud_importer']
-              importer_metadata = importer_metadata.is_a?(Hash) ? importer_metadata.dup : {}
-              importer_metadata['unit_scale'] = unit_scale
-              metadata['point_cloud_importer'] = importer_metadata
-            end
+            importer_metadata = metadata['point_cloud_importer']
+            importer_metadata = importer_metadata.is_a?(Hash) ? importer_metadata.dup : {}
+            importer_metadata['unit_scale'] = unit_scale if unit_scale && (unit_scale - 1.0).abs >= Float::EPSILON
+            importer_metadata['point_unit'] = cloud_context[:point_unit].to_s if cloud_context[:point_unit]
+            importer_metadata['sketchup_unit'] = cloud_context[:sketchup_unit].to_s if cloud_context[:sketchup_unit]
+            importer_metadata['detected_point_unit'] = cloud_context[:detected_point_unit].to_s if cloud_context[:detected_point_unit]
+            metadata['point_cloud_importer'] = importer_metadata unless importer_metadata.empty?
             cloud.update_metadata!(metadata)
 
             completion_time = Time.now
