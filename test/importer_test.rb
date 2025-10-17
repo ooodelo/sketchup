@@ -5,6 +5,19 @@ require 'minitest/autorun'
 
 require_relative '../point_cloud_importer/importer'
 
+module Sketchup
+end unless defined?(Sketchup)
+
+module Sketchup
+  class << self
+    attr_accessor :__test_active_model unless respond_to?(:__test_active_model=)
+  end
+
+  def self.active_model
+    @__test_active_model
+  end unless respond_to?(:active_model)
+end
+
 module PointCloudImporter
   class ImporterThrottleTest < Minitest::Test
     class FakeView
@@ -50,6 +63,72 @@ module PointCloudImporter
       end
 
       assert_equal 2, @view.invalidate_count
+    end
+  end
+end
+
+module PointCloudImporter
+  class ImporterUnitScaleTest < Minitest::Test
+    FakeUnitsOptions = Struct.new(:length_unit) do
+      def [](key)
+        return length_unit if key == 'LengthUnit'
+
+        nil
+      end
+    end
+
+    FakeOptions = Struct.new(:units_provider) do
+      def [](key)
+        return units_provider if key == 'UnitsOptions'
+
+        nil
+      end
+    end
+
+    FakeModel = Struct.new(:length_unit) do
+      def options
+        FakeOptions.new(FakeUnitsOptions.new(length_unit))
+      end
+    end
+
+    def setup
+      @manager = Struct.new(:view).new(nil)
+      @importer = Importer.new(@manager)
+      Sketchup.__test_active_model = nil if Sketchup.respond_to?(:__test_active_model=)
+    end
+
+    def teardown
+      Sketchup.__test_active_model = nil if Sketchup.respond_to?(:__test_active_model=)
+    end
+
+    def test_resolve_unit_scale_uses_model_units_when_not_provided
+      Sketchup.__test_active_model = FakeModel.new(2)
+
+      scale = @importer.send(:resolve_unit_scale, nil)
+
+      assert_in_delta(1.0 / 25.4, scale, 1e-9)
+    end
+
+    def test_resolve_unit_scale_prefers_provided_value
+      scale = @importer.send(:resolve_unit_scale, 0.5)
+
+      assert_in_delta(0.5, scale, 1e-9)
+    end
+
+    def test_resolve_unit_scale_falls_back_to_default_when_invalid
+      Sketchup.__test_active_model = FakeModel.new(nil)
+
+      scale = @importer.send(:resolve_unit_scale, 0)
+
+      assert_in_delta(1.0, scale, 1e-9)
+    end
+
+    def test_scale_points_mutates_coordinates_in_place
+      points = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+
+      @importer.send(:scale_points!, points, 2.0)
+
+      assert_equal [[2.0, 4.0, 6.0], [8.0, 10.0, 12.0]], points
     end
   end
 end
