@@ -15,19 +15,22 @@ module PointCloudImporter
 
     MAX_MESSAGES_PER_TICK = 100
     MAX_TICK_DURATION = 0.008
+    MAX_QUEUE_SIZE = 32
 
     def initialize
-      @queue = Queue.new
+      @queue = SizedQueue.new(MAX_QUEUE_SIZE)
       @timer_mutex = Mutex.new
       @timer_id = nil
+      @main_thread = Thread.current
       ensure_timer
     end
 
     def enqueue(&block)
       raise ArgumentError, 'block required' unless block
 
-      @queue << block
-      ensure_timer
+      return enqueue_from_main_thread(block) if Thread.current == @main_thread
+
+      enqueue_with_backpressure(block)
     end
 
     def process_tick
@@ -67,6 +70,26 @@ module PointCloudImporter
       @queue.pop(true)
     rescue ThreadError
       nil
+    end
+
+    def enqueue_with_backpressure(block)
+      @queue.push(block)
+      ensure_timer
+    end
+
+    def enqueue_from_main_thread(block)
+      @queue.push(block, true)
+      ensure_timer
+    rescue ThreadError
+      execute_inline(block)
+    end
+
+    def execute_inline(block)
+      block.call
+    rescue StandardError => e
+      Logger.debug do
+        "MainThreadQueue handler failed: #{e.class}: #{e.message}\n#{Array(e.backtrace).join("\n")}"
+      end
     end
 
     def ensure_timer
