@@ -23,6 +23,18 @@ module PointCloudImporter
     RENDER_CACHE_RETRY_INTERVAL = 0.1
     RENDER_CACHE_MAX_ATTEMPTS = 10
     RENDER_CACHE_TIMEOUT = 3.0
+    DEFAULT_UNIT_SCALE = 1.0
+    MM_TO_INCH = 1.0 / 25.4
+    UNIT_SCALE_FACTORS = {
+      0 => 1.0, # Inches
+      1 => 12.0, # Feet
+      2 => MM_TO_INCH, # Millimeters
+      3 => MM_TO_INCH * 10.0, # Centimeters
+      4 => MM_TO_INCH * 1_000.0, # Meters
+      5 => MM_TO_INCH * 1_000_000.0, # Kilometers
+      6 => 36.0, # Yards
+      7 => 63_360.0 # Miles
+    }.freeze
 
     def initialize(manager)
       @manager = manager
@@ -41,7 +53,8 @@ module PointCloudImporter
     end
 
     def import(path, options = {})
-      options = (options || {})
+      options = (options || {}).dup
+      options[:unit_scale] = resolve_unit_scale(options[:unit_scale])
       job = ImportJob.new(path, options)
       run_job(job)
       job
@@ -54,6 +67,82 @@ module PointCloudImporter
     }.freeze
 
     private
+
+    def resolve_unit_scale(preferred)
+      extract_valid_unit_scale(preferred) || extract_valid_unit_scale(model_unit_scale) || DEFAULT_UNIT_SCALE
+    end
+
+    def sanitized_unit_scale(value)
+      extract_valid_unit_scale(value) || DEFAULT_UNIT_SCALE
+    end
+
+    def extract_valid_unit_scale(value)
+      return nil if value.nil?
+      return nil unless value.respond_to?(:to_f)
+
+      scale = value.to_f
+      return nil unless scale.finite? && scale.positive?
+
+      scale
+    rescue StandardError
+      nil
+    end
+
+    def model_unit_scale
+      return DEFAULT_UNIT_SCALE unless defined?(Sketchup) && Sketchup.respond_to?(:active_model)
+
+      model = Sketchup.active_model
+      return DEFAULT_UNIT_SCALE unless model
+
+      units_options = fetch_units_options(model)
+      return DEFAULT_UNIT_SCALE unless units_options
+
+      unit_value = begin
+        units_options['LengthUnit']
+      rescue StandardError
+        nil
+      end
+
+      unit_key = unit_value.respond_to?(:to_i) ? unit_value.to_i : unit_value
+      UNIT_SCALE_FACTORS[unit_key] || DEFAULT_UNIT_SCALE
+    rescue StandardError
+      DEFAULT_UNIT_SCALE
+    end
+
+    def fetch_units_options(model)
+      return nil unless model.respond_to?(:options)
+
+      options = model.options
+      return nil unless options.respond_to?(:[])
+
+      options['UnitsOptions']
+    rescue StandardError
+      nil
+    end
+
+    def scale_points!(points, scale)
+      return points unless points && !points.empty?
+      return points if scale.nil? || (scale - 1.0).abs < Float::EPSILON
+
+      points.each_with_index do |point, index|
+        next unless point
+
+        if point.is_a?(Array)
+          x = point[0]
+          y = point[1]
+          z = point[2]
+          next if x.nil? || y.nil? || z.nil?
+
+          point[0] = x.to_f * scale
+          point[1] = y.to_f * scale
+          point[2] = z.to_f * scale
+        elsif point.respond_to?(:x) && point.respond_to?(:y) && point.respond_to?(:z)
+          points[index] = [point.x.to_f * scale, point.y.to_f * scale, point.z.to_f * scale]
+        end
+      end
+
+      points
+    end
 
     def run_job(job)
       @last_result = nil
@@ -88,6 +177,11 @@ module PointCloudImporter
             progress_callback: job.progress_callback,
             cancelled_callback: -> { job.cancel_requested? }
           )
+
+          unit_scale = sanitized_unit_scale(job.options[:unit_scale])
+          Logger.debug do
+            format('Импорт: коэффициент масштабирования координат %.6f', unit_scale)
+          end
 
           job.update_progress(
             processed_vertices: 0,
@@ -166,7 +260,8 @@ module PointCloudImporter
               start_time: start_time,
               chunk_size: chunk_size,
               binary_buffer_size: buffer_size,
-              binary_vertex_batch_size: batch_size_preference
+              binary_vertex_batch_size: batch_size_preference,
+              unit_scale: unit_scale
             }
           ]
 
@@ -205,6 +300,8 @@ module PointCloudImporter
           metadata = parser.parse(chunk_size: chunk_size) do |points_chunk, colors_chunk, intensities_chunk, processed|
             break if job.cancel_requested? || job.finished?
             next unless points_chunk && !points_chunk.empty?
+
+            scale_points!(points_chunk, unit_scale) if unit_scale != 1.0
 
           if accumulated_points
             accumulated_points.concat(points_chunk)
@@ -320,6 +417,7 @@ module PointCloudImporter
             cloud_context[:chunk_size] = payload[:chunk_size]
             cloud_context[:binary_buffer_size] = payload[:binary_buffer_size]
             cloud_context[:binary_vertex_batch_size] = payload[:binary_vertex_batch_size]
+            cloud_context[:unit_scale] = sanitized_unit_scale(payload[:unit_scale])
           when :append_chunk
             next if job.cancel_requested? || job.finished?
 
@@ -352,7 +450,14 @@ module PointCloudImporter
 
             cloud.finalize_bounds!
 
-            metadata = payload[:metadata] || {}
+            metadata = (payload[:metadata] || {}).dup
+            unit_scale = cloud_context[:unit_scale]
+            if unit_scale && (unit_scale - 1.0).abs >= Float::EPSILON
+              importer_metadata = metadata['point_cloud_importer']
+              importer_metadata = importer_metadata.is_a?(Hash) ? importer_metadata.dup : {}
+              importer_metadata['unit_scale'] = unit_scale
+              metadata['point_cloud_importer'] = importer_metadata
+            end
             cloud.update_metadata!(metadata)
 
             completion_time = Time.now
