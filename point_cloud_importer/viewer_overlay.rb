@@ -1,6 +1,9 @@
 # encoding: utf-8
 # frozen_string_literal: true
 
+require_relative 'logger'
+require_relative 'threading'
+
 module PointCloudImporter
   # Overlay responsible for rendering active point clouds efficiently.
   class ViewerOverlay < Sketchup::Overlay
@@ -9,17 +12,23 @@ module PointCloudImporter
     RAMP_DURATION = 1.5
     MAX_LIMIT_EPSILON = 1
     DENSITY_EPSILON = 0.01
+    DIAGNOSTIC_UPDATE_INTERVAL = 0.2
 
     def initialize(manager)
       super('Point Cloud Overlay')
       @manager = manager
       @render_states = {}
+      @diagnostic_lines = []
+      @last_diagnostic_update = -Float::INFINITY
     end
 
     def draw(view)
+      Threading.guard(:ui, message: 'ViewerOverlay#draw')
       clouds = Array(@manager.clouds)
       apply_render_throttle(clouds)
       @manager.draw(view)
+      update_diagnostics(view)
+      render_diagnostics(view)
       cleanup_render_states(clouds)
     end
 
@@ -146,6 +155,92 @@ module PointCloudImporter
         end
         @render_states.delete(cloud)
       end
+    end
+
+    def update_diagnostics(view)
+      now = monotonic_time
+      return if (now - @last_diagnostic_update) < DIAGNOSTIC_UPDATE_INTERVAL
+
+      @last_diagnostic_update = now
+      lines = []
+
+      fps_text = sample_fps(view)
+      lines << "FPS: #{fps_text}" if fps_text
+
+      active_cloud = @manager.active_cloud
+      if active_cloud && active_cloud.visible?
+        visible = active_cloud.respond_to?(:last_visible_point_count) ?
+                    active_cloud.last_visible_point_count.to_i : 0
+        lod = active_cloud.respond_to?(:current_lod_level) ? active_cloud.current_lod_level : nil
+        sampling_ms = if active_cloud.respond_to?(:last_sampling_duration)
+                        duration = active_cloud.last_sampling_duration
+                        duration ? duration * 1000.0 : nil
+                      end
+
+        lines << format('Visible: %s pts | LOD: %s',
+                         format_point_count(visible),
+                         format_lod(lod))
+        lines << format('Sample: %s ms', sampling_ms ? format('%.1f', sampling_ms) : 'n/a')
+      else
+        lines << 'Облако не выбрано'
+      end
+
+      @diagnostic_lines = lines
+    rescue StandardError => e
+      Logger.debug { "Overlay diagnostics update failed: #{e.message}" }
+    end
+
+    def render_diagnostics(view)
+      lines = @diagnostic_lines
+      return unless lines && !lines.empty?
+
+      base_x = 12
+      base_y = 24
+      line_height = 16
+
+      lines.each_with_index do |text, index|
+        view.draw_text([base_x, base_y + (index * line_height)], text)
+      end
+    rescue StandardError => e
+      Logger.debug { "Overlay diagnostics render failed: #{e.message}" }
+    end
+
+    def sample_fps(view)
+      return nil unless view
+
+      if view.respond_to?(:average_refresh_time)
+        refresh = view.average_refresh_time
+        return nil unless refresh && refresh.positive?
+
+        format('%.2f', 1.0 / refresh)
+      elsif view.respond_to?(:fps)
+        fps = view.fps
+        fps_value = fps.respond_to?(:to_f) ? fps.to_f : nil
+        fps_value ? format('%.2f', fps_value) : nil
+      end
+    rescue StandardError
+      nil
+    end
+
+    def format_point_count(value)
+      count = value.to_i
+      if count >= 1_000_000
+        formatted = format('%.1fM', count / 1_000_000.0)
+        formatted.sub(/\.0M\z/, 'M')
+      elsif count >= 1_000
+        formatted = format('%.1fK', count / 1_000.0)
+        formatted.sub(/\.0K\z/, 'K')
+      else
+        count.to_s
+      end
+    end
+
+    def format_lod(value)
+      return 'n/a' unless value
+
+      format('%.2f', value.to_f)
+    rescue StandardError
+      'n/a'
     end
 
     def startup_phase?(cloud)

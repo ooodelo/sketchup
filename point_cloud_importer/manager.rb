@@ -10,6 +10,7 @@ require_relative 'viewer_overlay'
 require_relative 'measure_tool'
 require_relative 'measurement_history'
 require_relative 'main_thread_queue'
+require_relative 'threading'
 
 module PointCloudImporter
   # Central registry for loaded point clouds.
@@ -46,6 +47,7 @@ module PointCloudImporter
     end
 
     def clear!
+      Threading.guard(:ui, message: 'Manager#clear!')
       clouds_to_dispose = []
       overlay_to_remove = nil
       model = Sketchup.active_model
@@ -81,6 +83,7 @@ module PointCloudImporter
     end
 
     def ensure_overlay!
+      Threading.guard(:ui, message: 'Manager#ensure_overlay!')
       return unless Sketchup.active_model.respond_to?(:model_overlays)
       return if @overlay
 
@@ -89,6 +92,7 @@ module PointCloudImporter
     end
 
     def toggle_active_visibility
+      Threading.guard(:ui, message: 'Manager#toggle_active_visibility')
       cloud = active_cloud
       return unless cloud
 
@@ -99,6 +103,7 @@ module PointCloudImporter
     end
 
     def toggle_active_inference_guides
+      Threading.guard(:ui, message: 'Manager#toggle_active_inference_guides')
       cloud = active_cloud
       model = Sketchup.active_model
       return unless cloud && model
@@ -113,6 +118,7 @@ module PointCloudImporter
     end
 
     def draw(view)
+      Threading.guard(:ui, message: 'Manager#draw')
       clouds_snapshot = clouds
 
       clouds_snapshot.each do |cloud|
@@ -213,6 +219,7 @@ module PointCloudImporter
     end
 
     def register_cloud!(cloud)
+      Threading.guard(:ui, message: 'Manager#register_cloud!')
       return unless cloud
 
       point_count = cloud.points ? cloud.points.length : 0
@@ -244,6 +251,7 @@ module PointCloudImporter
     end
 
     def unregister_cloud!(cloud)
+      Threading.guard(:ui, message: 'Manager#unregister_cloud!')
       return unless cloud
 
       removed_cloud = nil

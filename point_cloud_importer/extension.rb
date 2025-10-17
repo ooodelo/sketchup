@@ -3,6 +3,7 @@
 
 require 'sketchup.rb'
 
+require_relative 'threading'
 require_relative 'settings'
 require_relative 'manager'
 require_relative 'ui/commands'
@@ -20,7 +21,10 @@ module PointCloudImporter
       invalidate_every_n_chunks: 25,
       build_octree_async: true,
       logging_enabled: true,
-      metrics_enabled: false
+      metrics_enabled: false,
+      stress_reference_path: File.expand_path(File.join('..', 'docs', 'reference_cloud.ply'), __dir__),
+      stress_log_path: nil,
+      stress_long_phase_threshold: 5.0
     }.freeze
 
     def chunk_size
@@ -91,6 +95,33 @@ module PointCloudImporter
       @metrics_enabled = boolean(value, DEFAULTS[:metrics_enabled])
     end
 
+    def stress_reference_path
+      @stress_reference_path ||= DEFAULTS[:stress_reference_path]
+    end
+
+    def stress_reference_path=(value)
+      candidate = value.to_s.strip
+      @stress_reference_path = candidate.empty? ? DEFAULTS[:stress_reference_path] : candidate
+    end
+
+    def stress_log_path
+      return DEFAULTS[:stress_log_path] unless instance_variable_defined?(:@stress_log_path)
+
+      @stress_log_path
+    end
+
+    def stress_log_path=(value)
+      @stress_log_path = value
+    end
+
+    def stress_long_phase_threshold
+      @stress_long_phase_threshold ||= DEFAULTS[:stress_long_phase_threshold]
+    end
+
+    def stress_long_phase_threshold=(value)
+      @stress_long_phase_threshold = normalize_float(value, DEFAULTS[:stress_long_phase_threshold])
+    end
+
     def load_from_settings(settings = Settings.instance)
       self.chunk_size = settings[:import_chunk_size]
       self.invalidate_every_n_chunks = settings[:invalidate_every_n_chunks]
@@ -100,6 +131,9 @@ module PointCloudImporter
       self.build_octree_async = settings[:build_octree_async]
       self.logging_enabled = settings[:logging_enabled]
       self.metrics_enabled = settings[:metrics_enabled]
+      self.stress_reference_path = settings[:stress_reference_path] if settings[:stress_reference_path]
+      self.stress_log_path = settings[:stress_log_path] if settings[:stress_log_path]
+      self.stress_long_phase_threshold = settings[:stress_long_phase_threshold] if settings[:stress_long_phase_threshold]
       self
     end
 
@@ -121,6 +155,12 @@ module PointCloudImporter
         self.logging_enabled = value
       when :metrics_enabled
         self.metrics_enabled = value
+      when :stress_reference_path
+        self.stress_reference_path = value
+      when :stress_log_path
+        self.stress_log_path = value
+      when :stress_long_phase_threshold
+        self.stress_long_phase_threshold = value
       end
     end
 
@@ -182,7 +222,22 @@ module PointCloudImporter
     rescue ArgumentError, TypeError
       nil
     end
+
+    def normalize_float(value, default)
+      case value
+      when nil
+        default
+      when Numeric
+        value.to_f
+      else
+        Float(value)
+      end
+    rescue StandardError
+      default
+    end
   end
+
+  Threading.register_ui_thread!
 
   module Extension
     extend self

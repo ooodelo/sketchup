@@ -10,6 +10,7 @@ require_relative 'octree'
 require_relative 'chunked_array'
 require_relative 'inference_sampler'
 require_relative 'logger'
+require_relative 'threading'
 
 module PointCloudImporter
   # Data structure representing a point cloud and display preferences.
@@ -17,7 +18,7 @@ module PointCloudImporter
     attr_reader :name, :points, :colors, :intensities
     attr_accessor :visible
     attr_reader :point_size, :point_style, :inference_sample_indices, :inference_mode
-    attr_reader :color_mode, :color_gradient
+    attr_reader :color_mode, :color_gradient, :last_visible_point_count, :last_sampling_duration
 
     def rename!(new_name)
       candidate = new_name.to_s
@@ -197,6 +198,8 @@ module PointCloudImporter
       @render_cache_preparation_pending = false
       @manager_ref = nil
       @packed_color_cache = {}
+      @last_visible_point_count = 0
+      @last_sampling_duration = nil
       append_points!(points, colors, intensities) if points && !points.empty?
 
       @inference_sample_indices = nil
@@ -329,6 +332,10 @@ module PointCloudImporter
     def render_max_display_points
       override = @render_max_points_override
       override.nil? ? @max_display_points.to_i : override.to_i
+    end
+
+    def current_lod_level
+      @lod_current_level || LOD_LEVELS.first
     end
 
     def lod0_point_count
@@ -497,6 +504,7 @@ module PointCloudImporter
     end
 
     def draw(view)
+      Threading.guard(:ui, message: 'PointCloud#draw')
       ensure_display_caches!
       caches = @lod_caches
       return unless caches && !caches.empty?
@@ -2465,6 +2473,7 @@ module PointCloudImporter
       total_points = points.length
       return if total_points.zero?
 
+      sampling_started_at = safe_monotonic_time
       octree = ensure_octree_for_cache(cache)
       frustum = ensure_frustum(view)
 
@@ -2481,8 +2490,16 @@ module PointCloudImporter
       indices = filter_indices_for_density(indices)
       indices = enforce_max_display_limit(indices)
 
+      visible_count = indices ? indices.length : 0
+      @last_visible_point_count = visible_count
+
       flush_index_batch(indices) do |start_index, end_index|
         yield(start_index, end_index)
+      end
+
+      @last_sampling_duration = begin
+        finish = safe_monotonic_time
+        sampling_started_at && finish ? (finish - sampling_started_at) : nil
       end
     end
 
@@ -2617,6 +2634,12 @@ module PointCloudImporter
       values.map { |value| format('%0.3f', value.to_f) }.join(':')
     rescue StandardError
       nil
+    end
+
+    def safe_monotonic_time
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    rescue StandardError
+      Time.now.to_f
     end
 
     def quantize_frustum_value(value, quantum)

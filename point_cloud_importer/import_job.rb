@@ -137,6 +137,10 @@ module PointCloudImporter
       @mutex.synchronize { @progress }
     end
 
+    def progress_frequency
+      @mutex.synchronize { @progress_estimator.emit_frequency }
+    end
+
     def message
       @mutex.synchronize { @message }
     end

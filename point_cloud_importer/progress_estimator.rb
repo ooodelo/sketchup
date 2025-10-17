@@ -4,7 +4,7 @@
 module PointCloudImporter
   # Estimates completion using vertex counts and/or consumed bytes.
   class ProgressEstimator
-    attr_reader :total_vertices, :total_bytes, :processed_vertices, :processed_bytes
+    attr_reader :total_vertices, :total_bytes, :processed_vertices, :processed_bytes, :last_emit_interval
 
     MIN_UPDATE_INTERVAL = 1.0 / 15.0
 
@@ -13,6 +13,7 @@ module PointCloudImporter
       @min_interval = MIN_UPDATE_INTERVAL
       @last_emit_at = -Float::INFINITY
       @last_message = nil
+      @last_emit_interval = nil
     end
 
     def reset(total_vertices: nil, total_bytes: nil)
@@ -22,6 +23,7 @@ module PointCloudImporter
       @processed_bytes = 0
       @last_emit_at = -Float::INFINITY
       @last_message = nil
+      @last_emit_interval = nil
     end
 
     def update_totals(total_vertices: nil, total_bytes: nil)
@@ -64,6 +66,15 @@ module PointCloudImporter
       end
     end
 
+    def emit_frequency
+      interval = @last_emit_interval
+      return nil unless interval && interval.positive?
+
+      1.0 / interval
+    rescue StandardError
+      nil
+    end
+
     private
 
     def vertex_fraction
@@ -96,6 +107,11 @@ module PointCloudImporter
     end
 
     def mark_emitted(now, message:)
+      @last_emit_interval = if @last_emit_at.finite?
+                              now - @last_emit_at
+                            else
+                              nil
+                            end
       @last_emit_at = now
       @last_message = message
     end
