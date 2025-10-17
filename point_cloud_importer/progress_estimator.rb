@@ -6,8 +6,13 @@ module PointCloudImporter
   class ProgressEstimator
     attr_reader :total_vertices, :total_bytes, :processed_vertices, :processed_bytes
 
+    MIN_UPDATE_INTERVAL = 1.0 / 15.0
+
     def initialize(total_vertices: nil, total_bytes: nil)
       reset(total_vertices: total_vertices, total_bytes: total_bytes)
+      @min_interval = MIN_UPDATE_INTERVAL
+      @last_emit_at = -Float::INFINITY
+      @last_message = nil
     end
 
     def reset(total_vertices: nil, total_bytes: nil)
@@ -15,6 +20,8 @@ module PointCloudImporter
       @total_bytes = normalize_total(total_bytes)
       @processed_vertices = 0
       @processed_bytes = 0
+      @last_emit_at = -Float::INFINITY
+      @last_message = nil
     end
 
     def update_totals(total_vertices: nil, total_bytes: nil)
@@ -74,6 +81,23 @@ module PointCloudImporter
     def normalize_total(value)
       total = value.to_i
       total.positive? ? total : 0
+    end
+
+    def ready_to_emit?(now, message:, fraction:, force: false)
+      return true if force
+
+      return true if fraction && fraction >= 1.0
+      return true if message && message != @last_message
+
+      elapsed = now - @last_emit_at
+      elapsed >= @min_interval
+    rescue StandardError
+      true
+    end
+
+    def mark_emitted(now, message:)
+      @last_emit_at = now
+      @last_message = message
     end
   end
 end

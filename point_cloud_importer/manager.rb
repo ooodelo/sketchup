@@ -9,6 +9,7 @@ require_relative 'logger'
 require_relative 'viewer_overlay'
 require_relative 'measure_tool'
 require_relative 'measurement_history'
+require_relative 'main_thread_queue'
 
 module PointCloudImporter
   # Central registry for loaded point clouds.
@@ -21,6 +22,7 @@ module PointCloudImporter
       @overlay = nil
       @active_cloud = nil
       @measurement_history = MeasurementHistory.new(self)
+      @cloud_registry = {}
     end
 
     def clouds
@@ -32,50 +34,15 @@ module PointCloudImporter
     end
 
     def active_cloud=(cloud)
-      with_clouds_lock do
-        unless cloud.nil? || @clouds.include?(cloud)
-          warn('[PointCloudImporter] Attempted to activate unmanaged cloud.')
-          return @active_cloud
-        end
-
-        @active_cloud = cloud
-      end
-      refresh_ui_panel
+      dispatch_to_main_thread { set_active_cloud!(cloud) }
     end
 
     def add_cloud(cloud)
-      with_clouds_lock do
-        @clouds << cloud
-        cloud.manager = self if cloud.respond_to?(:manager=)
-        self.active_cloud = cloud
-        ensure_overlay!
-      end
-      Logger.debug do
-        point_count = cloud.points ? cloud.points.length : 0
-        "Облако #{cloud.name.inspect} добавлено в менеджер (#{point_count} точек)"
-      end
-      log_registered_overlays
-      view.invalidate if view
+      dispatch_to_main_thread { register_cloud!(cloud) }
     end
 
     def remove_cloud(cloud)
-      removed_cloud = nil
-      with_clouds_lock do
-        removed_cloud = @clouds.delete(cloud)
-        return unless removed_cloud
-
-        self.active_cloud = @clouds.last
-      end
-
-      removed_cloud.manager = nil if removed_cloud.respond_to?(:manager=)
-
-      removed_cloud.dispose!
-      warn_unless_disposed(removed_cloud)
-      view.invalidate if view
-      refresh_ui_panel
-      Logger.debug do
-        "Облако #{removed_cloud&.name.inspect} удалено из менеджера"
-      end
+      dispatch_to_main_thread { unregister_cloud!(cloud) }
     end
 
     def clear!
@@ -87,7 +54,8 @@ module PointCloudImporter
       with_clouds_lock do
         clouds_to_dispose = @clouds.dup
         @clouds.clear
-        self.active_cloud = nil
+        @cloud_registry.clear
+        @active_cloud = nil
         if supports_overlays
           overlay_to_remove = @overlay
           @overlay = nil
@@ -237,6 +205,132 @@ module PointCloudImporter
     end
 
     private
+
+    def dispatch_to_main_thread(&block)
+      return unless block
+
+      MainThreadDispatcher.enqueue(&block)
+    end
+
+    def register_cloud!(cloud)
+      return unless cloud
+
+      point_count = cloud.points ? cloud.points.length : 0
+      identifier = cloud_identifier(cloud)
+
+      with_clouds_lock do
+        if identifier && @cloud_registry.key?(identifier)
+          Logger.debug do
+            "Облако с идентификатором #{identifier.inspect} уже зарегистрировано"
+          end
+          return
+        end
+
+        ensure_unique_name!(cloud)
+
+        @clouds << cloud
+        @cloud_registry[identifier] = cloud if identifier
+        cloud.manager = self if cloud.respond_to?(:manager=)
+        @active_cloud = cloud
+        ensure_overlay!
+      end
+
+      Logger.debug do
+        "Облако #{cloud.name.inspect} добавлено в менеджер (#{format_point_count(point_count)} точек)"
+      end
+      log_registered_overlays
+      view.invalidate if view
+      refresh_ui_panel
+    end
+
+    def unregister_cloud!(cloud)
+      return unless cloud
+
+      removed_cloud = nil
+
+      with_clouds_lock do
+        removed_cloud = @clouds.delete(cloud)
+        return unless removed_cloud
+
+        identifier = cloud_identifier(removed_cloud)
+        @cloud_registry.delete(identifier) if identifier
+        @active_cloud = @clouds.last
+      end
+
+      removed_cloud.manager = nil if removed_cloud.respond_to?(:manager=)
+
+      removed_cloud.dispose!
+      warn_unless_disposed(removed_cloud)
+      view.invalidate if view
+      refresh_ui_panel
+      Logger.debug do
+        "Облако #{removed_cloud&.name.inspect} удалено из менеджера"
+      end
+    end
+
+    def set_active_cloud!(cloud)
+      with_clouds_lock do
+        unless cloud.nil? || @clouds.include?(cloud)
+          Logger.debug do
+            "Попытка активировать незарегистрированное облако: #{cloud.inspect}"
+          end
+          return @active_cloud
+        end
+
+        @active_cloud = cloud
+      end
+
+      refresh_ui_panel
+      @active_cloud
+    end
+
+    def cloud_identifier(cloud)
+      return unless cloud
+
+      metadata = cloud.respond_to?(:metadata) ? cloud.metadata : {}
+      identifier = metadata[:import_uid]
+      identifier || cloud.__id__
+    rescue StandardError
+      cloud.__id__
+    end
+
+    def ensure_unique_name!(cloud)
+      return unless cloud.respond_to?(:name)
+
+      base_name = cloud.name.to_s.strip
+      base_name = 'Point Cloud' if base_name.empty?
+
+      existing_names = @clouds.map { |existing| existing.name.to_s }
+      candidate = base_name
+      suffix = 2
+
+      while existing_names.include?(candidate)
+        candidate = format('%s (%d)', base_name, suffix)
+        suffix += 1
+      end
+
+      return if candidate == cloud.name
+      return unless cloud.respond_to?(:rename!)
+
+      cloud.rename!(candidate)
+    rescue StandardError => e
+      Logger.debug { "Не удалось переименовать облако: #{e.class}: #{e.message}" }
+    end
+
+    def format_point_count(value)
+      count = value.to_i
+      if count >= 1_000_000
+        formatted = format('%.1fM', count / 1_000_000.0)
+        formatted.sub(/\.0M\z/, 'M')
+      elsif count >= 1_000
+        formatted = format('%.1fK', count / 1_000.0)
+        formatted.sub(/\.0K\z/, 'K')
+      else
+        count.to_s
+      end
+    rescue StandardError
+      value.to_s
+    end
 
     def log_registered_overlays
       model = Sketchup.active_model

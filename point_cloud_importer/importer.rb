@@ -3,6 +3,7 @@
 
 require 'stringio'
 require 'thread'
+require 'securerandom'
 
 require_relative 'settings'
 require_relative 'point_cloud'
@@ -400,7 +401,9 @@ module PointCloudImporter
           when :create_cloud
             return if job.cancel_requested? || job.finished?
 
-            cloud = PointCloud.new(name: payload[:name], metadata: payload[:metadata] || {})
+            cloud = PointCloud.new(name: payload[:name],
+                                   metadata: payload[:metadata] || {},
+                                   settings_snapshot: payload[:settings_snapshot])
             job.cloud = cloud
 
             if metrics_enabled_flag && !metrics_state[:assign_hooked]
@@ -576,6 +579,7 @@ module PointCloudImporter
 
           name = File.basename(job.path, '.*')
           settings = Settings.instance
+          settings_snapshot = settings.snapshot
           config = defined?(PointCloudImporter::Config) ? PointCloudImporter::Config : nil
 
           default_chunk_size = config&.chunk_size || 1_000_000
@@ -648,7 +652,8 @@ module PointCloudImporter
               unit_scale: unit_scale,
               point_unit: point_unit,
               sketchup_unit: sketchup_unit,
-              detected_point_unit: job.options[:detected_point_unit]
+              detected_point_unit: job.options[:detected_point_unit],
+              settings_snapshot: settings_snapshot
             }
           )
 
@@ -857,33 +862,42 @@ module PointCloudImporter
     end
 
     def finalize_completed_job(job)
-      data = job.result
+      data = job.result || {}
       cloud = data[:cloud]
-      metadata = data[:metadata]
+      metadata = (data[:metadata] || {}).dup
       duration = data[:duration]
       total_vertices = data[:total_vertices]
 
       raise ArgumentError, 'PLY файл не содержит точек' unless cloud && cloud.points && cloud.points.length.positive?
 
-      cloud.update_metadata!(metadata)
-      apply_visual_options(cloud, job.options)
-
-      unless job.cloud_added?
-        @manager.add_cloud(cloud)
-        job.mark_cloud_added!
-      end
+      metadata[:import_uid] ||= SecureRandom.uuid
 
       background_metrics_enabled = metrics_enabled?
       background_metric_logger = method(:log_metric)
       background_memory_fetcher = method(:capture_peak_memory_bytes)
 
-      schedule_cache_preparation = if cloud.respond_to?(:mark_render_cache_preparation_pending!)
-                                     cloud.mark_render_cache_preparation_pending!
-                                   else
-                                     true
-                                   end
+      result_struct = Result.new(cloud, duration)
 
-      if schedule_cache_preparation
+      steps = []
+
+      steps << lambda do
+        cloud.update_metadata!(metadata)
+        apply_visual_options(cloud, job.options)
+      end
+
+      steps << lambda do
+        next if job.cloud_added?
+
+        @manager.add_cloud(cloud)
+        job.mark_cloud_added!
+      end
+
+      steps << lambda do
+        next unless cloud.respond_to?(:mark_render_cache_preparation_pending!)
+
+        pending = cloud.mark_render_cache_preparation_pending!
+        next unless pending
+
         schedule_render_cache_preparation(
           cloud,
           metrics_enabled: background_metrics_enabled,
@@ -892,18 +906,51 @@ module PointCloudImporter
         )
       end
 
-      ::UI.messagebox(
-        "Импорт завершен за #{format('%.2f', duration)} сек. " \
-        "Импортировано #{format_point_count(cloud.points.length)} из #{format_point_count(total_vertices)} точек"
-      )
-      result = Result.new(cloud, duration)
-      @last_result = result
-      result
+      steps << lambda do
+        unless cloud.respond_to?(:mark_render_cache_preparation_pending!)
+          schedule_render_cache_preparation(
+            cloud,
+            metrics_enabled: background_metrics_enabled,
+            metric_logger: background_metric_logger,
+            memory_fetcher: background_memory_fetcher
+          )
+        end
+
+        duration_value = duration ? format('%.2f', duration) : '0.00'
+        imported = format_point_count(cloud.points.length)
+        total = format_point_count(total_vertices)
+        message = "Импорт завершен за #{duration_value} сек. " \
+                  "Импортировано #{imported} из #{total} точек"
+        ::UI.messagebox(message)
+        @last_result = result_struct
+      end
+
+      enqueue_sequence(steps)
+      nil
     rescue StandardError => e
       @last_result = nil
       ::UI.messagebox("Ошибка импорта: #{e.message}")
       nil
     end
+
+    def enqueue_sequence(steps)
+      steps = steps.compact
+      return if steps.empty?
+
+      step = steps.shift
+      MainThreadDispatcher.enqueue do
+        begin
+          step.call
+        rescue StandardError => error
+          Logger.debug do
+            "Ошибка при выполнении шага финализации: #{error.class}: #{error.message}"
+          end
+        ensure
+          enqueue_sequence(steps) unless steps.empty?
+        end
+      end
+    end
+    private :enqueue_sequence
 
     def log_failure_details(job)
       Logger.debug do

@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require_relative 'settings'
+require_relative 'logger'
 
 module PointCloudImporter
   # Represents a single node in the spatial octree.
@@ -67,20 +68,33 @@ module PointCloudImporter
       @last_query_stats = nil
     end
 
-    def build
+    def build(progress_callback: nil)
       clear
       return unless @points
 
+      builder = build_incremental(progress_callback: progress_callback)
+      until builder.finished?
+        builder.step(time_budget: nil)
+      end
+
+      @root = builder.root
+      update_metadata if built?
+      @root
+    end
+
+    def build_incremental(progress_callback: nil)
       indices = gather_indices(@points)
-      return if indices.empty?
+      return NullBuilder.new(self) if indices.empty?
 
       bounds = compute_bounds(indices)
-      return unless bounds
+      return NullBuilder.new(self) unless bounds
 
-      @root = OctreeNode.new(bounding_box: bounds, point_indices: indices, depth: 0)
-      subdivide(@root)
-      update_metadata
-      @root
+      Builder.new(self,
+                  indices: indices,
+                  bounds: bounds,
+                  max_points_per_node: @max_points_per_node,
+                  max_depth: @max_depth,
+                  progress_callback: progress_callback)
     end
 
     def clear
@@ -179,42 +193,158 @@ module PointCloudImporter
       end
     end
 
-    def subdivide(node)
-      stack = []
-      stack << node if node
-      buckets = Array.new(8) { [] }
+    class NullBuilder
+      Step = Struct.new(:ready_nodes, :progress, :finished)
 
-      until stack.empty?
-        current = stack.pop
-        next unless current
+      def initialize(octree)
+        @octree = octree
+        @finished = true
+      end
 
-        next if current.point_indices.length <= @max_points_per_node
-        next if current.depth >= @max_depth
+      def step(time_budget: nil)
+        Step.new([], 1.0, true)
+      end
 
-        bounds = current.bounding_box
+      def finished?
+        @finished
+      end
+
+      def root
+        @octree.root
+      end
+    end
+
+    class Builder
+      Step = Struct.new(:ready_nodes, :progress, :finished)
+
+      def initialize(octree, indices:, bounds:, max_points_per_node:, max_depth:, progress_callback: nil)
+        @octree = octree
+        @points = octree.points
+        @indices = Array(indices)
+        @bounds = bounds
+        @max_points_per_node = max_points_per_node
+        @max_depth = max_depth
+        @progress_callback = progress_callback
+        @queue = []
+        @processed_points = 0
+        @total_points = @indices.length
+        @finished = false
+        @root = nil
+        start
+      end
+
+      def step(time_budget: 0.008)
+        return Step.new([], 1.0, true) if finished?
+
+        ready_nodes = []
+        deadline = time_budget ? monotonic_time + time_budget.to_f : nil
+
+        while (node = @queue.shift)
+          process_node(node, ready_nodes)
+          break if deadline && monotonic_time >= deadline
+        end
+
+        progress = progress_fraction
+        notify_progress(progress, ready_nodes)
+
+        Step.new(ready_nodes, progress, finished?)
+      end
+
+      def finished?
+        @finished
+      end
+
+      def root
+        @root
+      end
+
+      private
+
+      def start
+        if @total_points.zero? || !@bounds
+          @finished = true
+          @root = nil
+          return
+        end
+
+        @root = OctreeNode.new(bounding_box: @bounds, point_indices: @indices.dup, depth: 0)
+        @octree.instance_variable_set(:@root, @root)
+        @queue << @root
+      end
+
+      def process_node(node, ready_nodes)
+        if leaf?(node)
+          finalize_leaf(node, ready_nodes)
+          check_finished!
+          return
+        end
+
+        bounds = node.bounding_box
         center = bounds.center
-        buckets.each(&:clear)
+        buckets = Array.new(8) { [] }
 
-        current.point_indices.each do |index|
+        node.point_indices.each do |index|
           point = @points && @points[index]
           next unless point
 
-          bucket_index = octant_index(point, center)
+          bucket_index = @octree.send(:octant_index, point, center)
           buckets[bucket_index] << index
         end
 
-        current.point_indices.clear
+        node.point_indices.clear
 
         buckets.each_with_index do |bucket, bucket_index|
           next if bucket.empty?
 
-          child_bounds = bounds_for_octant(bounds, center, bucket_index)
-          child_indices = bucket.dup
-          bucket.clear
-          child = OctreeNode.new(bounding_box: child_bounds, point_indices: child_indices, depth: current.depth + 1)
-          current.set_child(bucket_index, child)
-          stack << child
+          child_bounds = @octree.send(:bounds_for_octant, bounds, center, bucket_index)
+          child = OctreeNode.new(bounding_box: child_bounds, point_indices: bucket, depth: node.depth + 1)
+          node.set_child(bucket_index, child)
+          @queue << child
         end
+
+        finalize_leaf(node, ready_nodes) if node.leaf?
+        check_finished!
+      end
+
+      def leaf?(node)
+        node.point_indices.length <= @max_points_per_node || node.depth >= @max_depth
+      end
+
+      def finalize_leaf(node, ready_nodes)
+        @processed_points += node.point_indices.length
+        ready_nodes << node
+      end
+
+      def progress_fraction
+        return 1.0 if @total_points.zero?
+
+        fraction = @processed_points.to_f / @total_points
+        [[fraction, 0.0].max, 1.0].min
+      rescue StandardError
+        0.0
+      end
+
+      def notify_progress(progress, ready_nodes)
+        return unless @progress_callback
+
+        safe_ready = ready_nodes.compact
+        @progress_callback.call(progress, safe_ready)
+      rescue StandardError => e
+        Logger.debug { "Octree builder progress callback failed: #{e.class}: #{e.message}" }
+      end
+
+      def check_finished!
+        @finished = @queue.empty?
+      end
+
+      def monotonic_time
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      rescue NameError, Errno::EINVAL
+        Process.clock_gettime(:float_second)
+      rescue NameError, ArgumentError, Errno::EINVAL
+        Process.clock_gettime(Process::CLOCK_REALTIME)
+      rescue NameError, Errno::EINVAL
+        Time.now.to_f
       end
     end
 

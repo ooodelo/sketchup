@@ -10,7 +10,7 @@ require_relative 'main_thread_queue'
 module PointCloudImporter
   # Represents a background import job with shared state between threads.
   class ImportJob
-    MIN_PROGRESS_INTERVAL = 0.5
+    MIN_PROGRESS_INTERVAL = ProgressEstimator::MIN_UPDATE_INTERVAL
 
     class TimeoutError < StandardError; end
 
@@ -234,19 +234,12 @@ module PointCloudImporter
           clamped_fraction = clamp_fraction(fraction)
         end
 
-        elapsed = now - @last_progress_time
-
-        throttled = !force && elapsed < MIN_PROGRESS_INTERVAL
-        throttled &&= clamped_fraction && clamped_fraction < 1.0
-        throttled &&= message.nil? || message == @message
-
-        if throttled
+        unless @progress_estimator.ready_to_emit?(now,
+                                                  message: message,
+                                                  fraction: clamped_fraction,
+                                                  force: force)
           Logger.debug do
-            format(
-              'Пропуск обновления прогресса: прошло %.3f с (порог %.3f с)',
-              elapsed,
-              MIN_PROGRESS_INTERVAL
-            )
+            'Пропуск обновления прогресса: сработал троттлинг (15 Гц)'
           end
           @processed_vertices = [processed_vertices.to_i, @processed_vertices].max if processed_vertices
           return false
@@ -256,6 +249,7 @@ module PointCloudImporter
         @progress = clamped_fraction unless clamped_fraction.nil?
         @message = message if message
         @last_progress_time = now
+        @progress_estimator.mark_emitted(now, message: message)
         listeners = @progress_listeners.dup
         updated = true
       end
