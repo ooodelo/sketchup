@@ -366,7 +366,6 @@ module PointCloudImporter
       message_queue = SizedQueue.new(16)
       worker_finished = false
       worker = Thread.new do
-        Thread.current.abort_on_exception = false
         begin
           job.start!
           job.update_progress(processed_vertices: 0, message: 'Чтение PLY...')
