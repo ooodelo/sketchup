@@ -188,6 +188,13 @@ module PointCloudImporter
     extend self
 
     def activate
+      PointCloudImporter::Logger.debug do
+        model = Sketchup.active_model
+        supports = model && model.respond_to?(:model_overlays)
+        status = supports ? 'поддерживается' : 'не поддерживается'
+        "Model Overlay #{status} текущей моделью"
+      end
+
       PointCloudImporter::Settings.instance.load!
       PointCloudImporter::Config.load_from_settings(PointCloudImporter::Settings.instance)
       manager = PointCloudImporter::Manager.instance
