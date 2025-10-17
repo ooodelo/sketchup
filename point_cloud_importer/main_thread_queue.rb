@@ -21,7 +21,7 @@ module PointCloudImporter
       @queue = SizedQueue.new(MAX_QUEUE_SIZE)
       @timer_mutex = Mutex.new
       @timer_id = nil
-      @main_thread = Thread.current
+      @main_thread = Thread.main
       ensure_timer
     end
 
