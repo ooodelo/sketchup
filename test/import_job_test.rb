@@ -19,7 +19,7 @@ module PointCloudImporter
       assert_equal 'Первое обновление', job.message
       assert_in_delta 0.0, job.instance_variable_get(:@last_progress_time), 1e-6
 
-      job.stub(:monotonic_time, 0.1) do
+      job.stub(:monotonic_time, ImportJob::MIN_PROGRESS_INTERVAL * 0.5) do
         job.update_progress(0.5, 'Первое обновление')
       end
 

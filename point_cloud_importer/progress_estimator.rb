@@ -64,6 +64,23 @@ module PointCloudImporter
       end
     end
 
+    def ready_to_emit?(now, message:, fraction:, force: false)
+      return true if force
+
+      return true if fraction && fraction >= 1.0
+      return true if message && message != @last_message
+
+      elapsed = now - @last_emit_at
+      elapsed >= @min_interval
+    rescue StandardError
+      true
+    end
+
+    def mark_emitted(now, message:)
+      @last_emit_at = now
+      @last_message = message
+    end
+
     private
 
     def vertex_fraction
@@ -81,23 +98,6 @@ module PointCloudImporter
     def normalize_total(value)
       total = value.to_i
       total.positive? ? total : 0
-    end
-
-    def ready_to_emit?(now, message:, fraction:, force: false)
-      return true if force
-
-      return true if fraction && fraction >= 1.0
-      return true if message && message != @last_message
-
-      elapsed = now - @last_emit_at
-      elapsed >= @min_interval
-    rescue StandardError
-      true
-    end
-
-    def mark_emitted(now, message:)
-      @last_emit_at = now
-      @last_message = message
     end
   end
 end
