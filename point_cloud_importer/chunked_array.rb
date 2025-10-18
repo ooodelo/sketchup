@@ -12,6 +12,7 @@ module PointCloudImporter
 
     DEFAULT_CHUNK_CAPACITY = Settings::DEFAULTS[:chunk_capacity]
     DEFAULT_YIELD_INTERVAL = Settings::DEFAULTS[:yield_interval]
+    APPEND_YIELD_INTERVAL = DEFAULT_YIELD_INTERVAL
 
     attr_reader :chunk_capacity
 
@@ -86,18 +87,39 @@ module PointCloudImporter
     end
 
     def append_chunk(values)
-      return if values.nil? || values.empty?
+      append_batch!(values)
+    end
 
-      if values.length <= @chunk_capacity
-        @chunks << values
-        @length += values.length
+    def append_batch!(values, valid_length = nil, yield_interval: nil)
+      return if values.nil?
+
+      length = valid_length ? valid_length.to_i : values.length
+      length = values.length if length > values.length
+      return if length <= 0
+
+      step = resolve_yield_interval(yield_interval || APPEND_YIELD_INTERVAL)
+      counter = 0
+
+      index = 0
+      while index < length
+        slice_length = [@chunk_capacity, length - index].min
+        if index.zero? && slice_length == values.length
+          chunk = values
+        else
+          chunk = values.slice(index, slice_length) || []
+        end
+
+        chunk_length = chunk.length
+        next if chunk_length.zero?
+
+        @chunks << chunk
+        @length += chunk_length
         @last_len = 0
         @mutable_last_chunk = false
-        return
-      end
 
-      values.each_slice(@chunk_capacity) do |slice|
-        append_chunk(slice)
+        index += slice_length
+        counter += slice_length
+        yield_to_scheduler if step.positive? && (counter % step).zero?
       end
     end
 

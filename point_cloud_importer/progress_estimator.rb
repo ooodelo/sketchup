@@ -6,7 +6,7 @@ module PointCloudImporter
   class ProgressEstimator
     attr_reader :total_vertices, :total_bytes, :processed_vertices, :processed_bytes, :last_emit_interval
 
-    MIN_UPDATE_INTERVAL = 1.0 / 12.0
+    MIN_UPDATE_INTERVAL = 1.0 / 15.0
 
     def initialize(total_vertices: nil, total_bytes: nil)
       reset(total_vertices: total_vertices, total_bytes: total_bytes)

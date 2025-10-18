@@ -20,10 +20,17 @@ module PointCloudImporter
   class Importer
     Result = Struct.new(:cloud, :duration)
 
+    ChunkPayload = Struct.new(:points,
+                              :colors,
+                              :intensities,
+                              :bounds,
+                              :intensity_range,
+                              :processed_vertices,
+                              :count)
+
     attr_reader :last_result
 
     VIEW_INVALIDATE_INTERVAL = 0.2
-    ACCUMULATED_CHUNK_MAX_INTERVAL = 0.1
     RENDER_CACHE_RETRY_INTERVAL = 0.1
     RENDER_CACHE_MAX_ATTEMPTS = 10
     RENDER_CACHE_TIMEOUT = 3.0
@@ -581,15 +588,15 @@ module PointCloudImporter
 
             append_started_at = metrics_enabled_flag ? Time.now : nil
             cloud.append_points!(
-              payload[:points],
-              payload[:colors],
-              payload[:intensities],
-              bounds: payload[:bounds],
-              intensity_range: payload[:intensity_range]
+              payload.points,
+              payload.colors,
+              payload.intensities,
+              bounds: payload.bounds,
+              intensity_range: payload.intensity_range
             )
             if metrics_enabled_flag && append_started_at
               metrics_state[:append_duration] += Time.now - append_started_at
-              metrics_state[:append_points] += collection_length(payload[:points]).to_i
+              metrics_state[:append_points] += (payload.count || collection_length(payload.points)).to_i
             end
 
             cloud_context[:chunks_processed] += 1
@@ -824,42 +831,6 @@ module PointCloudImporter
             }
           )
 
-          chunks_processed = 0
-          accumulated_points = nil
-          accumulated_colors = nil
-          accumulated_intensities = nil
-          accumulated_bounds = nil
-          accumulated_intensity_range = nil
-          accumulated_count = 0
-          accumulation_started_at = nil
-
-          flush_accumulated = lambda do
-            return unless accumulated_points && !accumulated_points.empty?
-
-            colors_payload = accumulated_colors
-            colors_payload = nil if colors_payload.is_a?(Array) && colors_payload.empty?
-            intensities_payload = accumulated_intensities
-            intensities_payload = nil if intensities_payload.is_a?(Array) && intensities_payload.empty?
-
-            payload = {
-              points: accumulated_points,
-              colors: colors_payload,
-              intensities: intensities_payload
-            }
-            payload[:bounds] = accumulated_bounds.dup if accumulated_bounds
-            payload[:intensity_range] = accumulated_intensity_range.dup if accumulated_intensity_range
-
-            dispatch.call(:append_chunk, payload)
-
-            accumulated_points = nil
-            accumulated_colors = nil
-            accumulated_intensities = nil
-            accumulated_bounds = nil
-            accumulated_intensity_range = nil
-            accumulated_count = 0
-            accumulation_started_at = nil
-            chunks_processed += 1
-          end
           parsing_started_at = metrics_enabled_flag ? Time.now : nil
           metadata = parser.parse(chunk_size: chunk_size) do |points_chunk, colors_chunk, intensities_chunk, processed|
             break if job.cancel_requested? || job.finished?
@@ -869,39 +840,21 @@ module PointCloudImporter
             scale_points!(points_chunk, unit_scale) if unit_scale != 1.0
 
             chunk_bounds = compute_chunk_bounds(points_chunk)
-            accumulated_bounds = merge_bounds(accumulated_bounds, chunk_bounds) if chunk_bounds
+            chunk_range = if intensities_chunk && !intensities_chunk.empty?
+                            compute_intensity_range(intensities_chunk)
+                          end
 
-            if accumulated_points
-              accumulated_points.concat(points_chunk)
-            else
-              accumulated_points = points_chunk
-              accumulation_started_at = monotonic_time
-            end
+            payload = ChunkPayload.new(
+              points_chunk,
+              colors_chunk && !colors_chunk.empty? ? colors_chunk : nil,
+              intensities_chunk && !intensities_chunk.empty? ? intensities_chunk : nil,
+              chunk_bounds,
+              chunk_range,
+              processed,
+              points_chunk.length
+            )
 
-            if colors_chunk && !colors_chunk.empty?
-              if accumulated_colors
-                accumulated_colors.concat(colors_chunk)
-              else
-                accumulated_colors = colors_chunk
-              end
-            end
-
-            if intensities_chunk && !intensities_chunk.empty?
-              if accumulated_intensities
-                accumulated_intensities.concat(intensities_chunk)
-              else
-                accumulated_intensities = intensities_chunk
-              end
-              chunk_range = compute_intensity_range(intensities_chunk)
-              accumulated_intensity_range = merge_intensity_range(accumulated_intensity_range, chunk_range) if chunk_range
-            end
-
-            accumulated_count += points_chunk.length
-
-            now = monotonic_time
-            if accumulated_count >= chunk_size || (accumulation_started_at && now - accumulation_started_at >= ACCUMULATED_CHUNK_MAX_INTERVAL)
-              flush_accumulated.call
-            end
+            dispatch.call(:append_chunk, payload)
 
             total_vertices = parser.total_vertex_count.to_i
             total_vertices = processed if total_vertices.zero? || total_vertices < processed
@@ -911,8 +864,6 @@ module PointCloudImporter
               message: format_progress_message(processed, total_vertices)
             )
           end
-
-          flush_accumulated.call
 
           parsing_finished_at = metrics_enabled_flag ? Time.now : nil
 

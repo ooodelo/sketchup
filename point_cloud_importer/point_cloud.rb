@@ -69,14 +69,13 @@ module PointCloudImporter
       tasks = %i[display_cache color_refresh spatial_index].select { |task| pending[task] }
       return self if tasks.empty?
 
-      runner = lambda do
-        tasks.each { |task| run_post_import_task(task) }
-      end
-
       if scheduler
-        scheduler.enqueue(&runner)
+        kickoff_display_pipeline!(pending_tasks: tasks, scheduler: scheduler)
       else
-        runner.call
+        prepare_initial_frame!(manager&.view)
+        tasks.each { |task| run_post_import_task(task) }
+        release_initial_frame_constraints!
+        finalize_kickoff_background!
       end
 
       self
@@ -113,6 +112,10 @@ module PointCloudImporter
     BACKGROUND_SAMPLE_MIN_SIZE = 50_000
     BACKGROUND_MAX_ITERATIONS = 10_000
     BACKGROUND_MAX_DURATION = 120.0
+
+    KICKOFF_INITIAL_DENSITY = 0.3
+    KICKOFF_STAGE_DELAY = 0.05
+    KICKOFF_RELAX_DELAY = 0.5
 
     LARGE_POINT_COUNT_THRESHOLD = 3_000_000
     DEFAULT_DISPLAY_POINT_CAP = 1_200_000
@@ -969,21 +972,21 @@ module PointCloudImporter
     def append_points!(points_chunk, colors_chunk = nil, intensities_chunk = nil, bounds: nil, intensity_range: nil)
       return if points_chunk.nil? || points_chunk.empty?
 
-      @points.append_chunk(points_chunk)
+      @points.append_batch!(points_chunk)
 
       if colors_chunk && !colors_chunk.empty?
         @colors ||= ChunkedArray.new(@points.chunk_capacity)
         if colors_chunk.all? { |color| color.is_a?(Integer) }
-          @colors.append_chunk(colors_chunk)
+          @colors.append_batch!(colors_chunk)
         else
           normalized_colors = colors_chunk.map { |color| pack_color_value(color) }
-          @colors.append_chunk(normalized_colors)
+          @colors.append_batch!(normalized_colors)
         end
       end
 
       if intensities_chunk && !intensities_chunk.empty?
         @intensities ||= ChunkedArray.new(@points.chunk_capacity)
-        @intensities.append_chunk(intensities_chunk)
+        @intensities.append_batch!(intensities_chunk)
       end
 
       clear_color_cache!
@@ -1005,7 +1008,76 @@ module PointCloudImporter
       @metadata = (metadata || {}).dup
     end
 
-    private
+  private
+
+    def kickoff_display_pipeline!(pending_tasks:, scheduler:, view: nil)
+      scheduler ||= MainThreadScheduler.instance
+      tasks = Array(pending_tasks).dup
+
+      stages = []
+      kickoff_view = view || manager&.view
+
+      stages << { action: -> { prepare_initial_frame!(kickoff_view) }, delay: KICKOFF_STAGE_DELAY }
+
+      tasks.each do |task|
+        stages << { action: -> { run_post_import_task(task) }, delay: KICKOFF_STAGE_DELAY }
+        stages << { action: -> { release_initial_frame_constraints! }, delay: KICKOFF_RELAX_DELAY } if task == :display_cache
+      end
+
+      stages << { action: -> { finalize_kickoff_background! }, delay: KICKOFF_STAGE_DELAY }
+
+      scheduler.schedule(name: 'point-cloud-kickoff', priority: 110) do |context|
+        entry = stages.shift
+        return :done unless entry
+
+        begin
+          entry[:action]&.call
+        rescue StandardError => e
+          Logger.debug { "Kickoff stage failed: #{e.class}: #{e.message}" }
+        end
+
+        if stages.empty?
+          :done
+        else
+          delay = entry[:delay].to_f
+          context.reschedule_in = delay.positive? ? delay : KICKOFF_STAGE_DELAY
+          :pending
+        end
+      end
+    end
+
+    def prepare_initial_frame!(_view)
+      ensure_display_caches!
+      limit = initial_display_limit
+      density = render_density
+      density = KICKOFF_INITIAL_DENSITY if density > KICKOFF_INITIAL_DENSITY
+      density = 0.01 if density <= 0.0
+      payload_limit = limit && limit.positive? ? limit : nil
+      apply_render_constraints!(density: density, max_display_points: payload_limit)
+      throttled_view_invalidate
+    end
+
+    def release_initial_frame_constraints!
+      clear_render_constraints!
+      throttled_view_invalidate
+    end
+
+    def finalize_kickoff_background!
+      resume_background_lod_build!
+      throttled_view_invalidate
+    end
+
+    def initial_display_limit
+      cache = @lod_caches ? @lod_caches[LOD_LEVELS.first] : nil
+      cache_size = cache && cache[:points] ? cache[:points].length : points&.length.to_i
+      limit = resolved_startup_cap
+      limit = cache_size if limit <= 0
+      if cache_size.positive? && limit.positive?
+        [limit, cache_size].min
+      else
+        limit
+      end
+    end
 
     def mark_post_import_task!(task)
       @pending_import_tasks ||= {}
