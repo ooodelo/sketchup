@@ -12,12 +12,16 @@ module PointCloudImporter
     Cancelled = Class.new(StandardError)
 
     DEFAULT_CHUNK_SIZE = 100_000
-    PROGRESS_REPORT_INTERVAL = 0.5
+    PROGRESS_REPORT_INTERVAL = 0.1
     THREAD_YIELD_INTERVAL = 10_000
-    BINARY_READ_BUFFER_SIZE = 1_048_576
-    BINARY_VERTEX_BATCH_MIN = 4_096
-    BINARY_VERTEX_BATCH_MAX = 8_192
+    ASCII_READ_BLOCK_SIZE = 1_048_576
+    BINARY_READ_BUFFER_SIZE = 8_388_608
+    BINARY_VERTEX_BATCH_MIN = 65_536
+    BINARY_VERTEX_BATCH_MAX = 262_144
     DEFAULT_BINARY_VERTEX_BATCH_SIZE = BINARY_VERTEX_BATCH_MIN
+    BINARY_BATCH_TIME_BUDGET = 0.008
+    BINARY_BATCH_GROW_THRESHOLD = 0.004
+    BINARY_BATCH_SHRINK_FACTOR = 0.5
 
 
     TYPE_MAP = {
@@ -112,7 +116,6 @@ module PointCloudImporter
           total_bytes: data_bytes_total
         )
         @estimated_progress = 0.0
-        @last_data_position = io.pos
         @last_report_time = monotonic_time - PROGRESS_REPORT_INTERVAL
 
         @format_string_cache = {}
@@ -213,16 +216,51 @@ module PointCloudImporter
       intensities_chunk = intensity_index ? [] : nil
       processed = 0
 
+      chunk_size = [chunk_size.to_i, 1].max
       yield_interval = configuration_value(:yield_interval, THREAD_YIELD_INTERVAL)
 
-      vertex_count.times do |index|
+      buffer = +''
+      eof = false
+
+      fetch_line = lambda do
+        loop do
+          newline_index = buffer.index("\n")
+          if newline_index
+            raw = buffer.slice!(0, newline_index + 1)
+            raw.chomp!
+            return raw
+          end
+
+          break if eof
+
+          chunk = io.read(ASCII_READ_BLOCK_SIZE)
+          if chunk.nil? || chunk.empty?
+            eof = true
+            break
+          end
+
+          buffer << chunk
+        end
+
+        return nil if buffer.empty?
+
+        raw = buffer.dup
+        buffer.clear
+        raw.chomp!
+        raw
+      end
+
+      loop do
+        break if vertex_count.positive? && processed >= vertex_count
+
         check_cancelled!
-        Thread.pass if yield_interval.positive? && (index % yield_interval).zero? && index.positive?
-        line = io.gets
-        current_pos = io.pos
-        consumed_bytes = [current_pos - @last_data_position, 0].max
-        @last_data_position = current_pos
-        break unless line
+
+        raw_line = fetch_line.call
+        break unless raw_line
+
+        consumed_bytes = raw_line.bytesize
+        line = raw_line.strip
+        next if line.empty?
 
         values = line.split
         point, color, intensity = interpret_vertex(values, property_index_by_name, color_indices, intensity_index)
@@ -232,6 +270,10 @@ module PointCloudImporter
         processed += 1
 
         update_progress(processed_vertices: processed, consumed_bytes: consumed_bytes)
+
+        if yield_interval.positive? && (processed % yield_interval).zero?
+          Thread.pass
+        end
 
         next unless points_chunk.length >= chunk_size
 
@@ -274,11 +316,12 @@ module PointCloudImporter
       batch_size_preference = configuration_value(:binary_vertex_batch_size,
                                                   DEFAULT_BINARY_VERTEX_BATCH_SIZE)
       batch_size_preference = batch_size_preference.to_i
-      if batch_size_preference < BINARY_VERTEX_BATCH_MIN
-        batch_size_preference = BINARY_VERTEX_BATCH_MIN
-      elsif batch_size_preference > BINARY_VERTEX_BATCH_MAX
-        batch_size_preference = BINARY_VERTEX_BATCH_MAX
-      end
+      batch_size_preference = BINARY_VERTEX_BATCH_MIN if batch_size_preference < BINARY_VERTEX_BATCH_MIN
+      batch_size_preference = BINARY_VERTEX_BATCH_MAX if batch_size_preference > BINARY_VERTEX_BATCH_MAX
+
+      current_batch_size = batch_size_preference
+      time_budget = configuration_value(:binary_batch_time_budget, BINARY_BATCH_TIME_BUDGET)
+      time_budget = BINARY_BATCH_TIME_BUDGET if !time_budget.is_a?(Numeric) || time_budget <= 0.0
 
       yield_interval = configuration_value(:yield_interval, THREAD_YIELD_INTERVAL)
 
@@ -293,11 +336,19 @@ module PointCloudImporter
         check_cancelled!
 
         remaining = vertex_count - processed
-        batch_size = [batch_size_preference, max_vertices_per_buffer, remaining, BINARY_VERTEX_BATCH_MAX].min
+        capacity_limit = [max_vertices_per_buffer, BINARY_VERTEX_BATCH_MAX].min
+        capacity_limit = 1 if capacity_limit < 1
+        effective_min = [BINARY_VERTEX_BATCH_MIN, capacity_limit].min
+        target_batch = [current_batch_size, remaining].min
+        batch_size = [target_batch, capacity_limit].min
+        batch_size = effective_min if batch_size < effective_min && remaining >= effective_min
+        batch_size = remaining if batch_size > remaining
+        batch_size = 1 if batch_size < 1
         bytes_to_read = stride * batch_size
         raw_data = io.read(bytes_to_read)
         break unless raw_data && raw_data.bytesize == bytes_to_read
 
+        batch_started_at = monotonic_time
         flat_values = raw_data.unpack(
           build_format_string(properties, endian: endian, batch_size: batch_size)
         )
@@ -332,6 +383,16 @@ module PointCloudImporter
         end
 
         update_progress(processed_vertices: processed, consumed_bytes: bytes_to_read)
+
+        elapsed = monotonic_time - batch_started_at
+        if batch_size >= capacity_limit
+          # Keep current batch when we are at the hard capacity limit.
+        elsif elapsed > time_budget && current_batch_size > effective_min
+          current_batch_size = [(current_batch_size * BINARY_BATCH_SHRINK_FACTOR).to_i, effective_min].max
+        elsif elapsed < BINARY_BATCH_GROW_THRESHOLD && current_batch_size < BINARY_VERTEX_BATCH_MAX
+          growth = [current_batch_size * 2, BINARY_VERTEX_BATCH_MAX].min
+          current_batch_size = [growth, capacity_limit].min
+        end
       end
 
       emit_chunk(points_chunk, colors_chunk, intensities_chunk, processed, block)
@@ -365,6 +426,12 @@ module PointCloudImporter
         config.sanitize_binary_buffer_size(config.binary_buffer_size)
       when :binary_vertex_batch_size
         config.sanitize_binary_vertex_batch_size(config.binary_vertex_batch_size)
+      when :binary_batch_time_budget
+        if config.respond_to?(:sanitize_binary_batch_time_budget)
+          config.sanitize_binary_batch_time_budget(config.binary_batch_time_budget)
+        else
+          fallback
+        end
       when :chunk_size
         config.sanitize_chunk_size(config.chunk_size)
       else
