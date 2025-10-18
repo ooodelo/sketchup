@@ -10,9 +10,9 @@ module PointCloudImporter
 
     MIN_UPDATE_INTERVAL = 1.0 / 15.0
 
-    def initialize(total_vertices: nil, total_bytes: nil)
+    def initialize(total_vertices: nil, total_bytes: nil, min_interval: MIN_UPDATE_INTERVAL)
       reset(total_vertices: total_vertices, total_bytes: total_bytes)
-      @min_interval = MIN_UPDATE_INTERVAL
+      @min_interval = normalize_interval(min_interval)
       @last_emit_at = -Float::INFINITY
       @last_message = nil
       @last_emit_interval = nil
@@ -102,6 +102,12 @@ module PointCloudImporter
     def normalize_total(value)
       total = value.to_i
       total.positive? ? total : 0
+    end
+
+    def normalize_interval(value)
+      candidate = value.to_f
+      candidate = MIN_UPDATE_INTERVAL if candidate.nan? || !candidate.finite? || candidate <= 0.0
+      candidate
     end
 
     def ready_to_emit?(now, message:, fraction:, force: false)

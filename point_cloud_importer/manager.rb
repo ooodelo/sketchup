@@ -17,6 +17,16 @@ module PointCloudImporter
   class Manager
     include Singleton
 
+    class << self
+      def supports_overlays?(model = Sketchup.active_model)
+        return false unless model
+
+        model.respond_to?(:model_overlays)
+      rescue StandardError
+        false
+      end
+    end
+
     def initialize
       @clouds_lock = Mutex.new
       @clouds = []
@@ -51,7 +61,7 @@ module PointCloudImporter
       clouds_to_dispose = []
       overlay_to_remove = nil
       model = Sketchup.active_model
-      supports_overlays = model.respond_to?(:model_overlays)
+      supports_overlays = supports_overlays?(model)
 
       with_clouds_lock do
         clouds_to_dispose = @clouds.dup
@@ -84,7 +94,7 @@ module PointCloudImporter
 
     def ensure_overlay!
       Threading.guard(:ui, message: 'Manager#ensure_overlay!')
-      return unless Sketchup.active_model.respond_to?(:model_overlays)
+      return unless supports_overlays?(Sketchup.active_model)
       return if @overlay
 
       @overlay = ViewerOverlay.new(self)
@@ -342,7 +352,7 @@ module PointCloudImporter
 
     def log_registered_overlays
       model = Sketchup.active_model
-      return unless model&.respond_to?(:model_overlays)
+      return unless supports_overlays?(model)
 
       overlays = model.model_overlays.map(&:name)
       Logger.debug do
@@ -395,6 +405,10 @@ module PointCloudImporter
       screen = view.screen_coords(mid_point)
       label = measurement[:label] || Sketchup.format_length(measurement[:distance])
       view.draw_text(screen, label, size: 14, color: Sketchup::Color.new(255, 255, 255))
+    end
+
+    def supports_overlays?(model = Sketchup.active_model)
+      self.class.supports_overlays?(model)
     end
   end
 end

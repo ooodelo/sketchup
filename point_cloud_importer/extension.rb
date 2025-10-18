@@ -293,7 +293,7 @@ module PointCloudImporter
 
       PointCloudImporter::Logger.debug do
         model = Sketchup.active_model
-        supports = model && model.respond_to?(:model_overlays)
+        supports = PointCloudImporter::Manager.supports_overlays?(model)
         status = supports ? 'поддерживается' : 'не поддерживается'
         "Model Overlay #{status} текущей моделью"
       end

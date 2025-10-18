@@ -72,9 +72,8 @@ module PointCloudImporter
       @cancelled_callback = cancelled_callback
       @total_vertex_count = 0
       @metadata = {}
-      @last_report_time = monotonic_time - PROGRESS_REPORT_INTERVAL
       @estimated_progress = 0.0
-      @progress_estimator = ProgressEstimator.new
+      @progress_estimator = ProgressEstimator.new(min_interval: PROGRESS_REPORT_INTERVAL)
     end
 
     def parse(chunk_size: nil, &block)
@@ -113,10 +112,10 @@ module PointCloudImporter
         data_bytes_total = remaining_bytes(io)
         @progress_estimator = ProgressEstimator.new(
           total_vertices: @total_vertex_count,
-          total_bytes: data_bytes_total
+          total_bytes: data_bytes_total,
+          min_interval: PROGRESS_REPORT_INTERVAL
         )
         @estimated_progress = 0.0
-        @last_report_time = monotonic_time - PROGRESS_REPORT_INTERVAL
 
         @format_string_cache = {}
 
@@ -562,12 +561,17 @@ module PointCloudImporter
       check_cancelled!
       return unless @progress_callback
 
-      now = monotonic_time
-      emit = force || ((now - @last_report_time) >= PROGRESS_REPORT_INTERVAL)
-      emit ||= @estimated_progress >= 1.0
-      return unless emit
+      estimator = @progress_estimator
+      return unless estimator
 
-      @last_report_time = now
+      now = monotonic_time
+      emitted = estimator.poll(message: nil,
+                               fraction: @estimated_progress,
+                               force: force,
+                               now: now,
+                               respect_message_change: false)
+      return unless emitted
+
       @progress_callback.call(
         processed_vertices: @progress_estimator.processed_vertices,
         consumed_bytes: consumed_bytes,
