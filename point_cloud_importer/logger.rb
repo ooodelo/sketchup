@@ -2,6 +2,8 @@
 # frozen_string_literal: true
 
 require 'thread'
+require 'tmpdir'
+require 'fileutils'
 
 module PointCloudImporter
   # Simple logger that prints diagnostic messages to the Ruby console.
@@ -9,30 +11,47 @@ module PointCloudImporter
     module_function
 
     LOG_REPEAT_WINDOW = 0.75
+    LOG_FILENAME = 'point_cloud_importer.log'
 
     def debug(message = nil, &block)
-      return unless logging_enabled?
-
-      text = if block
-               safe_call(block)
-             else
-               message
-             end
+      text = block ? safe_call(block) : message
       return unless text
 
       now = monotonic_time
 
       synchronize do
+        append_to_log(text)
+
+        unless logging_enabled?
+          @last_emit_at = now
+          next
+        end
+
         flush_repeated(now, reason: :timeout)
 
         if repeated_message?(text)
           @repeat_count += 1
           @last_repeat_at = now
-          return
+          next
         end
 
         flush_repeated(now, reason: :change)
-        emit(text, now)
+        emit_to_console(text, now)
+        remember_message(text, now)
+      end
+    rescue StandardError
+      nil
+    end
+
+    def error(message = nil, &block)
+      text = block ? safe_call(block) : message
+      return unless text
+
+      now = monotonic_time
+
+      synchronize do
+        append_to_log(text)
+        emit_to_console(text, now)
         remember_message(text, now)
       end
     rescue StandardError
@@ -66,12 +85,44 @@ module PointCloudImporter
     end
     private_class_method :mutex
 
-    def emit(text, now)
+    def emit_to_console(text, now)
       timestamp = Time.now.strftime('%H:%M:%S')
       ::Kernel.puts("[PointCloudImporter #{timestamp}] #{text}")
       @last_emit_at = now
     end
-    private_class_method :emit
+    private_class_method :emit_to_console
+
+    def append_to_log(text)
+      path = log_path
+      return unless path
+
+      line = format_log_line(text)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.open(path, 'a:UTF-8') { |file| file.puts(line) }
+      path
+    rescue StandardError
+      nil
+    end
+    private_class_method :append_to_log
+
+    def format_log_line(text)
+      timestamp = Time.now.strftime('%Y-%m-%d %H:%M:%S')
+      "[PointCloudImporter #{timestamp}] #{text}"
+    end
+    private_class_method :format_log_line
+
+    def log_path
+      @log_path ||= begin
+        base = if defined?(Sketchup) && Sketchup.respond_to?(:temp_dir)
+                 Sketchup.temp_dir
+               else
+                 Dir.tmpdir
+               end
+        File.join(base, LOG_FILENAME)
+      rescue StandardError
+        File.join(Dir.tmpdir, LOG_FILENAME)
+      end
+    end
 
     def remember_message(text, now)
       @last_message = text
@@ -97,7 +148,8 @@ module PointCloudImporter
         count: @repeat_count
       )
 
-      emit(summary, now)
+      append_to_log(summary)
+      emit_to_console(summary, now)
       @repeat_count = 0
       @last_message = nil
       @last_repeat_at = nil

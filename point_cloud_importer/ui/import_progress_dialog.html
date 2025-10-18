@@ -41,6 +41,11 @@
       transition: width 0.15s ease-out;
     }
 
+    .buttons {
+      display: flex;
+      gap: 8px;
+    }
+
     button {
       padding: 8px 16px;
       font-size: 14px;
@@ -49,49 +54,107 @@
       background-color: #ff5722;
       color: #fff;
       cursor: pointer;
+      transition: background-color 0.2s ease-out;
+    }
+
+    button.secondary {
+      background-color: transparent;
+      color: #ffc107;
+      border: 1px solid #ffc107;
     }
 
     button:disabled {
       background-color: #555;
+      color: #bbb;
       cursor: default;
+      border-color: #555;
+    }
+
+    body[data-status="failed"] .message {
+      color: #ffcdd2;
     }
   </style>
 </head>
 <body>
-  <h1>Импорт облака точек</h1>
+  <h1 id="pci-title">Импорт облака точек</h1>
   <div class="message" id="pci-message">Подготовка...</div>
-  <div class="progress-bar"><span id="pci-progress"></span></div>
-  <button id="pci-cancel">Отмена</button>
+  <div class="progress-bar" id="pci-progress-bar"><span id="pci-progress"></span></div>
+  <div class="buttons">
+    <button id="pci-cancel" data-action="cancel">Отмена</button>
+    <button id="pci-show-log" class="secondary" hidden>Показать лог</button>
+  </div>
 
   <script>
     const messageEl = document.getElementById('pci-message');
     const progressEl = document.getElementById('pci-progress');
+    const progressBarEl = document.getElementById('pci-progress-bar');
     const cancelButton = document.getElementById('pci-cancel');
+    const showLogButton = document.getElementById('pci-show-log');
+    const titleEl = document.getElementById('pci-title');
 
     window.pciImport = {
       update(payload) {
         if (typeof payload !== 'object' || !payload) return;
 
-        const { message, progress, cancellable } = payload;
-        if (typeof message === 'string') {
-          messageEl.textContent = message;
+        const { message, progress, cancellable, status, log_path: logPath, error_message: errorMessage } = payload;
+        const normalizedStatus = typeof status === 'string' ? status : '';
+        document.body.dataset.status = normalizedStatus;
+
+        if (normalizedStatus === 'failed') {
+          titleEl.textContent = 'Ошибка импорта';
+          const failureMessage = typeof errorMessage === 'string' && errorMessage.trim().length > 0
+            ? errorMessage
+            : (typeof message === 'string' ? message : 'Импорт завершился с ошибкой.');
+          messageEl.textContent = failureMessage;
+          progressBarEl.style.display = 'none';
+          cancelButton.textContent = 'Закрыть';
+          cancelButton.dataset.action = 'close';
+          cancelButton.disabled = false;
+          if (typeof logPath === 'string' && logPath.length > 0) {
+            showLogButton.hidden = false;
+            showLogButton.disabled = false;
+            showLogButton.dataset.logPath = logPath;
+          } else {
+            showLogButton.hidden = true;
+            showLogButton.dataset.logPath = '';
+          }
+        } else {
+          titleEl.textContent = 'Импорт облака точек';
+          if (typeof message === 'string') {
+            messageEl.textContent = message;
+          }
+          progressBarEl.style.display = 'block';
+          cancelButton.textContent = 'Отмена';
+          cancelButton.dataset.action = 'cancel';
+          if (typeof cancellable === 'boolean') {
+            cancelButton.disabled = !cancellable;
+          }
+          showLogButton.hidden = true;
+          showLogButton.dataset.logPath = '';
         }
 
         if (typeof progress === 'number' && Number.isFinite(progress)) {
           const percent = Math.max(0, Math.min(1, progress)) * 100;
           progressEl.style.width = `${percent}%`;
         }
-
-        if (typeof cancellable === 'boolean') {
-          cancelButton.disabled = !cancellable;
-        }
       }
     };
 
     cancelButton.addEventListener('click', () => {
-      if (window.sketchup && window.sketchup.pci_cancel_import) {
+      const action = cancelButton.dataset.action;
+      if (action === 'close') {
+        if (window.sketchup && window.sketchup.pci_close_dialog) {
+          window.sketchup.pci_close_dialog();
+        }
+      } else if (window.sketchup && window.sketchup.pci_cancel_import) {
         window.sketchup.pci_cancel_import();
       }
+    });
+
+    showLogButton.addEventListener('click', () => {
+      if (!window.sketchup || !window.sketchup.pci_show_log) return;
+      const logPath = showLogButton.dataset.logPath || '';
+      window.sketchup.pci_show_log(logPath);
     });
 
     document.addEventListener('DOMContentLoaded', () => {

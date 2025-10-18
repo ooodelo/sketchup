@@ -47,6 +47,8 @@ module PointCloudImporter
       @next_id = 1
       @timer_id = nil
       @tasks_sorted = true
+      @explicitly_started = false
+      @start_warning_emitted = false
     end
 
     def schedule(name:, priority: 0, delay: 0.0, quota: DEFAULT_TICK_BUDGET, cancel_if: nil, &block)
@@ -72,10 +74,27 @@ module PointCloudImporter
         @tasks << task
         @task_lookup[id] = task
         @tasks_sorted = false
-        ensure_timer_locked
+        warn_if_not_started_locked
+        start_timer_locked
       end
 
       TaskHandle.new(self, task[:id])
+    end
+
+    def ensure_started
+      Threading.guard(:ui, message: 'MainThreadScheduler#ensure_started')
+
+      @mutex.synchronize do
+        @explicitly_started = true
+        start_timer_locked
+      end
+
+      true
+    rescue StandardError => e
+      Logger.debug do
+        "Не удалось гарантировать запуск планировщика: #{e.class}: #{e.message}"
+      end
+      false
     end
 
     def cancel(id)
@@ -211,16 +230,7 @@ module PointCloudImporter
     end
 
     def ensure_timer_locked
-      return unless defined?(::UI)
-
-      return if @timer_id
-
-      begin
-        @timer_id = ::UI.start_timer(TIMER_INTERVAL, repeat: true) { process_tick }
-      rescue StandardError => e
-        Logger.debug { "Failed to start scheduler timer: #{e.class}: #{e.message}" }
-        @timer_id = nil
-      end
+      start_timer_locked
     end
 
     def maybe_stop_timer
@@ -245,6 +255,28 @@ module PointCloudImporter
       Process.clock_gettime(Process::CLOCK_MONOTONIC)
     rescue StandardError
       Time.now.to_f
+    end
+
+    def start_timer_locked
+      return unless defined?(::UI)
+      return if @timer_id
+
+      begin
+        @timer_id = ::UI.start_timer(TIMER_INTERVAL, repeat: true) { process_tick }
+      rescue StandardError => e
+        Logger.debug { "Failed to start scheduler timer: #{e.class}: #{e.message}" }
+        @timer_id = nil
+      end
+    end
+
+    def warn_if_not_started_locked
+      return if @explicitly_started
+      return if @start_warning_emitted
+
+      @start_warning_emitted = true
+      Logger.debug do
+        'MainThreadScheduler автоматически запустил таймер. Вызовите ensure_started на UI-потоке при активации.'
+      end
     end
   end
 
