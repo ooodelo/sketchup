@@ -473,7 +473,8 @@ module PointCloudImporter
 
     def run_job(job)
       Threading.guard(:ui, message: 'Importer#run_job')
-      MainThreadScheduler.instance.ensure_started
+      scheduler = MainThreadScheduler.instance
+      scheduler.ensure_started
       @last_result = nil
       metrics_enabled_flag = metrics_enabled?
       metrics_state = {
@@ -510,6 +511,8 @@ module PointCloudImporter
         end
       )
       progress_dialog.show
+      MainThreadDispatcher.enqueue { Logger.debug { 'DISPATCH_OK' } }
+      scheduler.schedule(name: 'ping', delay: 0.2) { Logger.debug { 'SCHED_OK' } }
 
       job.on_progress { MainThreadDispatcher.enqueue { progress_dialog.update } }
       job.on_state_change { MainThreadDispatcher.enqueue { progress_dialog.update } }
