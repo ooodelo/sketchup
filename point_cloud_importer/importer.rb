@@ -1237,8 +1237,10 @@ module PointCloudImporter
       escaped = URI::DEFAULT_PARSER.escape(normalized, /[^-\w.\/:]/)
       url = if escaped.start_with?('file://')
               escaped
+            elsif escaped.start_with?('//')
+              "file:#{escaped}"
             elsif escaped.start_with?('/')
-              "file://#{escaped}"
+              "file:///#{escaped.sub(%r{^/+}, '')}"
             else
               "file:///#{escaped}"
             end
