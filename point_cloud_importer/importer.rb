@@ -520,8 +520,8 @@ module PointCloudImporter
         end
       )
       show_dialog = lambda do
-        next if progress_dialog_closed
-        next if dialog_shown
+        return if progress_dialog_closed
+        return if dialog_shown
 
         dialog_shown = true
         progress_dialog.show
