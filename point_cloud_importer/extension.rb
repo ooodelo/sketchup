@@ -266,12 +266,13 @@ module PointCloudImporter
     end
   end
 
-  Threading.register_ui_thread!
-
   module Extension
     extend self
 
     def activate
+      Threading.register_ui_thread!
+      PointCloudImporter::MainThreadScheduler.instance.ensure_started
+
       PointCloudImporter::Logger.debug do
         model = Sketchup.active_model
         supports = model && model.respond_to?(:model_overlays)
@@ -281,7 +282,6 @@ module PointCloudImporter
 
       PointCloudImporter::Settings.instance.load!
       PointCloudImporter::Config.load_from_settings(PointCloudImporter::Settings.instance)
-      PointCloudImporter::MainThreadScheduler.instance.ensure_started
       manager = PointCloudImporter::Manager.instance
       PointCloudImporter::UI::Commands.instance(manager).register!
       PointCloudImporter::UI::FirstImportWizard.show_if_needed(manager)
