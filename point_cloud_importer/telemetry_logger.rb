@@ -10,7 +10,11 @@ require 'tmpdir'
 
 require_relative 'logger'
 require_relative 'settings'
-require_relative 'extension'
+begin
+  require_relative 'extension'
+rescue LoadError
+  # Allow tests to run without SketchUp runtime dependencies.
+end
 
 module PointCloudImporter
   # Persists telemetry samples to CSV files for offline analysis.

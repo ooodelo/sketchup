@@ -351,6 +351,118 @@ module PointCloudImporter
       points
     end
 
+    def extract_point_coordinates(point)
+      return nil unless point
+
+      if point.respond_to?(:x) && point.respond_to?(:y) && point.respond_to?(:z)
+        [point.x.to_f, point.y.to_f, point.z.to_f]
+      elsif point.respond_to?(:[])
+        x = point[0]
+        y = point[1]
+        z = point[2]
+        return nil if x.nil? || y.nil? || z.nil?
+
+        [x.to_f, y.to_f, z.to_f]
+      end
+    rescue StandardError
+      nil
+    end
+
+    def compute_chunk_bounds(points)
+      return nil unless points && !points.empty?
+
+      min_x = Float::INFINITY
+      min_y = Float::INFINITY
+      min_z = Float::INFINITY
+      max_x = -Float::INFINITY
+      max_y = -Float::INFINITY
+      max_z = -Float::INFINITY
+
+      points.each do |point|
+        coords = extract_point_coordinates(point)
+        next unless coords
+
+        x, y, z = coords
+        min_x = x if x < min_x
+        max_x = x if x > max_x
+        min_y = y if y < min_y
+        max_y = y if y > max_y
+        min_z = z if z < min_z
+        max_z = z if z > max_z
+      end
+
+      return nil if min_x == Float::INFINITY
+
+      {
+        min_x: min_x,
+        min_y: min_y,
+        min_z: min_z,
+        max_x: max_x,
+        max_y: max_y,
+        max_z: max_z
+      }
+    end
+
+    def merge_bounds(existing, new_bounds)
+      return existing unless new_bounds
+      unless existing
+        return {
+          min_x: new_bounds[:min_x],
+          min_y: new_bounds[:min_y],
+          min_z: new_bounds[:min_z],
+          max_x: new_bounds[:max_x],
+          max_y: new_bounds[:max_y],
+          max_z: new_bounds[:max_z]
+        }
+      end
+
+      existing[:min_x] = [existing[:min_x], new_bounds[:min_x]].min
+      existing[:min_y] = [existing[:min_y], new_bounds[:min_y]].min
+      existing[:min_z] = [existing[:min_z], new_bounds[:min_z]].min
+      existing[:max_x] = [existing[:max_x], new_bounds[:max_x]].max
+      existing[:max_y] = [existing[:max_y], new_bounds[:max_y]].max
+      existing[:max_z] = [existing[:max_z], new_bounds[:max_z]].max
+
+      existing
+    end
+
+    def compute_intensity_range(values)
+      return nil unless values && !values.empty?
+
+      min_value = Float::INFINITY
+      max_value = -Float::INFINITY
+
+      values.each do |raw|
+        next unless raw.respond_to?(:to_f)
+
+        value = raw.to_f
+        next unless value.finite?
+
+        min_value = value if value < min_value
+        max_value = value if value > max_value
+      end
+
+      return nil if min_value == Float::INFINITY
+
+      { min: min_value, max: max_value }
+    end
+
+    def merge_intensity_range(existing, new_range)
+      return existing unless new_range
+      unless existing
+        return { min: new_range[:min], max: new_range[:max] }
+      end
+
+      if new_range[:min]
+        existing[:min] = [existing[:min], new_range[:min]].min
+      end
+      if new_range[:max]
+        existing[:max] = [existing[:max], new_range[:max]].max
+      end
+
+      existing
+    end
+
     def run_job(job)
       Threading.guard(:ui, message: 'Importer#run_job')
       @last_result = nil
@@ -440,7 +552,13 @@ module PointCloudImporter
             return unless cloud
 
             append_started_at = metrics_enabled_flag ? Time.now : nil
-            cloud.append_points!(payload[:points], payload[:colors], payload[:intensities])
+            cloud.append_points!(
+              payload[:points],
+              payload[:colors],
+              payload[:intensities],
+              bounds: payload[:bounds],
+              intensity_range: payload[:intensity_range]
+            )
             if metrics_enabled_flag && append_started_at
               metrics_state[:append_duration] += Time.now - append_started_at
               metrics_state[:append_points] += collection_length(payload[:points]).to_i
@@ -679,6 +797,8 @@ module PointCloudImporter
           accumulated_points = nil
           accumulated_colors = nil
           accumulated_intensities = nil
+          accumulated_bounds = nil
+          accumulated_intensity_range = nil
           accumulated_count = 0
           accumulation_started_at = nil
 
@@ -690,18 +810,21 @@ module PointCloudImporter
             intensities_payload = accumulated_intensities
             intensities_payload = nil if intensities_payload.is_a?(Array) && intensities_payload.empty?
 
-            dispatch.call(
-              :append_chunk,
-              {
-                points: accumulated_points,
-                colors: colors_payload,
-                intensities: intensities_payload
-              }
-            )
+            payload = {
+              points: accumulated_points,
+              colors: colors_payload,
+              intensities: intensities_payload
+            }
+            payload[:bounds] = accumulated_bounds.dup if accumulated_bounds
+            payload[:intensity_range] = accumulated_intensity_range.dup if accumulated_intensity_range
+
+            dispatch.call(:append_chunk, payload)
 
             accumulated_points = nil
             accumulated_colors = nil
             accumulated_intensities = nil
+            accumulated_bounds = nil
+            accumulated_intensity_range = nil
             accumulated_count = 0
             accumulation_started_at = nil
             chunks_processed += 1
@@ -713,6 +836,9 @@ module PointCloudImporter
             next unless points_chunk && !points_chunk.empty?
 
             scale_points!(points_chunk, unit_scale) if unit_scale != 1.0
+
+            chunk_bounds = compute_chunk_bounds(points_chunk)
+            accumulated_bounds = merge_bounds(accumulated_bounds, chunk_bounds) if chunk_bounds
 
             if accumulated_points
               accumulated_points.concat(points_chunk)
@@ -735,6 +861,8 @@ module PointCloudImporter
               else
                 accumulated_intensities = intensities_chunk
               end
+              chunk_range = compute_intensity_range(intensities_chunk)
+              accumulated_intensity_range = merge_intensity_range(accumulated_intensity_range, chunk_range) if chunk_range
             end
 
             accumulated_count += points_chunk.length

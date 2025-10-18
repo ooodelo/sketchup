@@ -69,6 +69,63 @@ module PointCloudImporter
 end
 
 module PointCloudImporter
+  class ImporterChunkAggregationTest < Minitest::Test
+    def setup
+      manager = Struct.new(:view).new(nil)
+      @importer = Importer.new(manager)
+    end
+
+    def test_compute_chunk_bounds_returns_min_max_coordinates
+      points = [[-2.0, 3.0, 0.5], [4.5, -1.0, 10.0], [0.0, 2.0, -5.0]]
+
+      bounds = @importer.send(:compute_chunk_bounds, points)
+
+      refute_nil bounds
+      assert_in_delta(-2.0, bounds[:min_x], 1e-9)
+      assert_in_delta(-1.0, bounds[:min_y], 1e-9)
+      assert_in_delta(-5.0, bounds[:min_z], 1e-9)
+      assert_in_delta(4.5, bounds[:max_x], 1e-9)
+      assert_in_delta(3.0, bounds[:max_y], 1e-9)
+      assert_in_delta(10.0, bounds[:max_z], 1e-9)
+    end
+
+    def test_merge_bounds_combines_extents
+      existing = { min_x: -1.0, min_y: -2.0, min_z: -3.0, max_x: 1.0, max_y: 2.0, max_z: 3.0 }
+      incoming = { min_x: -5.0, min_y: 0.0, min_z: -4.0, max_x: 10.0, max_y: 5.0, max_z: 8.0 }
+
+      merged = @importer.send(:merge_bounds, existing.dup, incoming)
+
+      assert_in_delta(-5.0, merged[:min_x], 1e-9)
+      assert_in_delta(-2.0, merged[:min_y], 1e-9)
+      assert_in_delta(-4.0, merged[:min_z], 1e-9)
+      assert_in_delta(10.0, merged[:max_x], 1e-9)
+      assert_in_delta(5.0, merged[:max_y], 1e-9)
+      assert_in_delta(8.0, merged[:max_z], 1e-9)
+    end
+
+    def test_compute_intensity_range_detects_min_max
+      values = [1.2, 5.0, 0.8, 7.5]
+
+      range = @importer.send(:compute_intensity_range, values)
+
+      refute_nil range
+      assert_in_delta(0.8, range[:min], 1e-9)
+      assert_in_delta(7.5, range[:max], 1e-9)
+    end
+
+    def test_merge_intensity_range_expands_existing
+      existing = { min: 0.5, max: 2.0 }
+      incoming = { min: 0.2, max: 3.5 }
+
+      merged = @importer.send(:merge_intensity_range, existing.dup, incoming)
+
+      assert_in_delta(0.2, merged[:min], 1e-9)
+      assert_in_delta(3.5, merged[:max], 1e-9)
+    end
+  end
+end
+
+module PointCloudImporter
   class ImporterUnitScaleTest < Minitest::Test
     FakeUnitsOptions = Struct.new(:length_unit) do
       def [](key)

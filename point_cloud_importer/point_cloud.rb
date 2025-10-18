@@ -920,7 +920,7 @@ module PointCloudImporter
       self
     end
 
-    def append_points!(points_chunk, colors_chunk = nil, intensities_chunk = nil)
+    def append_points!(points_chunk, colors_chunk = nil, intensities_chunk = nil, bounds: nil, intensity_range: nil)
       return if points_chunk.nil? || points_chunk.empty?
 
       @points.append_chunk(points_chunk)
@@ -938,12 +938,18 @@ module PointCloudImporter
       if intensities_chunk && !intensities_chunk.empty?
         @intensities ||= ChunkedArray.new(@points.chunk_capacity)
         @intensities.append_chunk(intensities_chunk)
-        update_intensity_range!(intensities_chunk)
       end
 
       clear_color_cache!
 
-      update_bounds_with_chunk(points_chunk)
+      bounds_applied = bounds && apply_bounds_aggregate(bounds)
+      update_bounds_with_chunk(points_chunk) unless bounds_applied
+
+      intensity_applied = intensity_range && apply_intensity_range_aggregate(intensity_range)
+      if !intensity_applied && intensities_chunk && !intensities_chunk.empty?
+        update_intensity_range!(intensities_chunk)
+      end
+
       invalidate_color_geometry!
 
       mark_display_cache_dirty!
@@ -992,6 +998,82 @@ module PointCloudImporter
       bbox.add(Geom::Point3d.new(@bounds_max_x, @bounds_max_y, @bounds_max_z))
       @bounding_box = bbox
       @bounding_box_dirty = false
+    end
+
+    def apply_bounds_aggregate(bounds)
+      return false unless bounds.is_a?(Hash)
+
+      min_x = coerce_numeric(bounds[:min_x])
+      min_y = coerce_numeric(bounds[:min_y])
+      min_z = coerce_numeric(bounds[:min_z])
+      max_x = coerce_numeric(bounds[:max_x])
+      max_y = coerce_numeric(bounds[:max_y])
+      max_z = coerce_numeric(bounds[:max_z])
+
+      return false if [min_x, min_y, min_z, max_x, max_y, max_z].any?(&:nil?)
+
+      if @bounds_min_x.nil?
+        @bounds_min_x = min_x
+        @bounds_min_y = min_y
+        @bounds_min_z = min_z
+        @bounds_max_x = max_x
+        @bounds_max_y = max_y
+        @bounds_max_z = max_z
+      else
+        @bounds_min_x = [@bounds_min_x, min_x].min
+        @bounds_min_y = [@bounds_min_y, min_y].min
+        @bounds_min_z = [@bounds_min_z, min_z].min
+        @bounds_max_x = [@bounds_max_x, max_x].max
+        @bounds_max_y = [@bounds_max_y, max_y].max
+        @bounds_max_z = [@bounds_max_z, max_z].max
+      end
+
+      @bounding_box_dirty = true
+      true
+    end
+
+    def apply_intensity_range_aggregate(range)
+      return false unless range.is_a?(Hash)
+
+      min_value = coerce_numeric(range[:min])
+      max_value = coerce_numeric(range[:max])
+
+      if min_value && max_value && min_value > max_value
+        min_value, max_value = max_value, min_value
+      end
+
+      applied = false
+
+      if min_value
+        @intensity_min = if @intensity_min.nil?
+                           min_value
+                         else
+                           [@intensity_min, min_value].min
+                         end
+        applied = true
+      end
+
+      if max_value
+        @intensity_max = if @intensity_max.nil?
+                           max_value
+                         else
+                           [@intensity_max, max_value].max
+                         end
+        applied = true
+      end
+
+      applied
+    end
+
+    def coerce_numeric(value)
+      return nil unless value.respond_to?(:to_f)
+
+      numeric = value.to_f
+      return nil unless numeric.finite?
+
+      numeric
+    rescue StandardError
+      nil
     end
 
     def update_bounds_with_chunk(points_chunk)
