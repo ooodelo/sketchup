@@ -13,6 +13,7 @@ require_relative 'import_job'
 require_relative 'logger'
 require_relative 'main_thread_queue'
 require_relative 'threading'
+require_relative 'io_utils'
 require_relative 'ui/import_progress_dialog'
 
 module PointCloudImporter
@@ -277,7 +278,7 @@ module PointCloudImporter
     def extract_ply_header_metadata(path)
       strings = []
 
-      File.open(path, 'rb') do |io|
+      IOUtils.open_read(path) do |io|
         first_line = io.gets
         return strings unless first_line && first_line.strip.casecmp('ply').zero?
 
@@ -295,6 +296,8 @@ module PointCloudImporter
       end
 
       strings
+    rescue IOUtils::AccessError, IOUtils::NotFoundError
+      []
     rescue StandardError
       []
     end
@@ -955,6 +958,9 @@ module PointCloudImporter
           end
         rescue PlyParser::Cancelled
           job.mark_cancelled!
+        rescue PlyParser::FileAccessError => e
+          job.fail!(e)
+          raise
         rescue PlyParser::UnsupportedFormat => e
           job.fail!(e)
           raise
