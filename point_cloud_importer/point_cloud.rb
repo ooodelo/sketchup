@@ -267,6 +267,7 @@ module PointCloudImporter
       @normalized_intensity_cache = nil
       @scalar_cache_generation = 0
       @color_generation_token = 0
+      @active_color_request_token = nil
       @scalar_cache_signature = nil
       @gradient_lut = nil
       @gradient_lut_key = nil
@@ -1270,6 +1271,10 @@ module PointCloudImporter
       @cached_color_bounds_generation = nil
       @random_color_cache = nil
       @random_color_cache_generation = nil
+      @normalized_height_cache = nil
+      @normalized_intensity_cache = nil
+      @scalar_cache_generation = 0
+      @scalar_cache_signature = nil
     end
 
     AXIS_INDICES = { x: 0, y: 1, z: 2 }.freeze
@@ -1385,48 +1390,89 @@ module PointCloudImporter
     end
 
     def scalar_cache_signature
-      [@bounds_min_x, @bounds_min_y, @bounds_min_z,
-       @bounds_max_x, @bounds_max_y, @bounds_max_z,
-       @intensity_min, @intensity_max,
-       @points ? @points.length : 0]
+      [
+        @color_geometry_generation,
+        @points ? @points.length : 0,
+        @intensities ? @intensities.length : 0,
+        @bounds_min_x, @bounds_min_y, @bounds_min_z,
+        @bounds_max_x, @bounds_max_y, @bounds_max_z,
+        @intensity_min, @intensity_max
+      ]
     end
 
     def ensure_scalar_cache_context!
       signature = scalar_cache_signature
-      return if @scalar_cache_signature == signature
+      generation = @color_geometry_generation
+      total_points = @points ? @points.length : 0
 
+      return if @scalar_cache_signature == signature &&
+                @scalar_cache_generation == generation &&
+                @normalized_height_cache &&
+                @normalized_height_cache.length == total_points &&
+                (!@normalized_intensity_cache.nil? || !has_intensity?)
+
+      build_scalar_cache!(generation, signature)
+    end
+
+    def build_scalar_cache!(generation, signature)
+      total = @points ? @points.length : 0
+      if total <= 0
+        @normalized_height_cache = []
+        @normalized_intensity_cache = []
+      else
+        heights = Array.new(total, 0.5)
+        intensity_cache = has_intensity? ? Array.new(total, 0.5) : nil
+        points = @points
+        intensities = @intensities if intensity_cache
+
+        total.times do |index|
+          point = points[index]
+          height = point ? normalize_height(point) : 0.5
+          heights[index] = height
+
+          next unless intensity_cache
+
+          raw_intensity = intensities ? intensities[index] : nil
+          intensity_cache[index] = if raw_intensity.nil?
+                                     height
+                                   else
+                                     normalize_intensity(raw_intensity)
+                                   end
+        end
+
+        @normalized_height_cache = heights
+        @normalized_intensity_cache = intensity_cache || heights
+      end
+
+      @scalar_cache_generation = generation
+      @scalar_cache_signature = signature
+    rescue StandardError
       @normalized_height_cache = nil
       @normalized_intensity_cache = nil
+      @scalar_cache_generation = generation
       @scalar_cache_signature = signature
     end
 
     def normalized_height_for(index)
       ensure_scalar_cache_context!
-      cache = (@normalized_height_cache ||= Array.new(@points ? @points.length : 0))
-      value = cache[index]
-      if value.nil?
-        point = @points[index]
-        value = point ? normalize_height(point) : 0.5
-        cache[index] = value
-      end
-      value
+      cache = @normalized_height_cache
+      return 0.5 unless cache && index
+
+      value = cache[index.to_i]
+      value.nil? ? 0.5 : value
     rescue StandardError
       0.5
     end
 
     def normalized_intensity_for(index)
       ensure_scalar_cache_context!
-      cache = (@normalized_intensity_cache ||= Array.new(@points ? @points.length : 0))
-      value = cache[index]
-      return value unless value.nil?
+      cache = @normalized_intensity_cache
+      if cache && index
+        value = cache[index.to_i]
+        return value unless value.nil?
+      end
 
-      intensity = intensity_at(index)
-      value = if !intensity.nil?
-                normalize_intensity(intensity)
-              else
-                normalized_height_for(index)
-              end
-      cache[index] = value
+      normalized_height_for(index)
     rescue StandardError
       0.5
     end
@@ -1480,7 +1526,30 @@ module PointCloudImporter
       end
       @color_rebuild_pending = false
       @color_rebuild_state = nil
+      @active_color_request_token = nil
       resume_background_lod_build!
+    end
+
+    def next_color_request_token
+      token = (@color_generation_token = @color_generation_token.to_i + 1)
+      @active_color_request_token = token
+      token
+    rescue StandardError
+      @active_color_request_token = nil
+      @color_generation_token = 0
+      0
+    end
+
+    def stale_color_request?(generation, token)
+      return true if @cache_dirty
+      return true unless generation == @color_rebuild_generation
+
+      active = @active_color_request_token
+      return true if active.nil?
+
+      token != active
+    rescue StandardError
+      true
     end
 
     def current_color_cache_key
@@ -1595,26 +1664,8 @@ module PointCloudImporter
     end
 
     def gradient_components(value)
-      lut = gradient_lut
-      return [255, 255, 255] unless lut && !lut.empty?
-
-      t = clamp01(value.to_f)
-      scaled = t * (lut.length - 1)
-      lower_index = scaled.floor
-      lower_index = 0 if lower_index.negative?
-      upper_index = [lower_index + 1, lut.length - 1].min
-      fraction = scaled - lower_index
-
-      lower = lut[lower_index]
-      upper = lut[upper_index]
-
-      if upper_index == lower_index || fraction.abs < Float::EPSILON
-        return lower.dup
-      end
-
-      lower.zip(upper).map do |min_component, max_component|
-        (min_component + (max_component - min_component) * fraction).round.clamp(0, 255)
-      end
+      packed = packed_gradient_sample(value)
+      fetch_color_components(packed) || [255, 255, 255]
     end
 
     def gradient_lut
@@ -1647,14 +1698,18 @@ module PointCloudImporter
           lower = stop
         end
 
+        lower_color = Array(lower && lower[1])
+        upper_color = Array(upper && upper[1])
+
         if upper == lower
-          lower[1].dup
+          pack_color_components(lower_color) || DEFAULT_PACKED_COLOR
         else
           range = upper[0] - lower[0]
           weight = range.abs < Float::EPSILON ? 0.0 : (t - lower[0]) / range
-          lower[1].zip(upper[1]).map do |min_component, max_component|
-            (min_component + (max_component - min_component) * weight).round.clamp(0, 255)
-          end
+          r = interpolate_component(lower_color[0], upper_color[0], weight)
+          g = interpolate_component(lower_color[1], upper_color[1], weight)
+          b = interpolate_component(lower_color[2], upper_color[2], weight)
+          pack_color_components([r, g, b]) || DEFAULT_PACKED_COLOR
         end
       end
 
@@ -1662,8 +1717,48 @@ module PointCloudImporter
       @gradient_lut = lut
     end
 
+    def interpolate_component(min_component, max_component, weight)
+      min_value = min_component.to_f
+      max_value = max_component.to_f
+      return min_value.to_i & 0xff if weight.nil?
+
+      (min_value + ((max_value - min_value) * weight.to_f)).round.clamp(0, 255)
+    rescue StandardError
+      min_component.to_i & 0xff
+    end
+
     def packed_gradient_color(value)
-      pack_color_components(gradient_components(value)) || DEFAULT_PACKED_COLOR
+      packed_gradient_sample(value)
+    end
+
+    def packed_gradient_sample(value)
+      lut = gradient_lut
+      return DEFAULT_PACKED_COLOR unless lut && !lut.empty?
+
+      t = clamp01(value.to_f)
+      scaled = t * (lut.length - 1)
+      lower_index = scaled.floor
+      lower_index = 0 if lower_index.negative?
+      upper_index = [lower_index + 1, lut.length - 1].min
+      fraction = scaled - lower_index
+
+      lower = lut[lower_index] || DEFAULT_PACKED_COLOR
+      upper = lut[upper_index] || lower
+
+      return lower if upper_index == lower_index || fraction.abs < Float::EPSILON
+
+      lr = (lower >> 16) & 0xff
+      lg = (lower >> 8) & 0xff
+      lb = lower & 0xff
+      ur = (upper >> 16) & 0xff
+      ug = (upper >> 8) & 0xff
+      ub = upper & 0xff
+
+      r = (lr + ((ur - lr) * fraction)).round.clamp(0, 255)
+      g = (lg + ((ug - lg) * fraction)).round.clamp(0, 255)
+      b = (lb + ((ub - lb) * fraction)).round.clamp(0, 255)
+
+      (r << 16) | (g << 8) | b
     rescue StandardError
       DEFAULT_PACKED_COLOR
     end
@@ -2057,12 +2152,15 @@ module PointCloudImporter
 
       cancel_color_rebuild!
       generation = @color_rebuild_generation
+      request_token = next_color_request_token
       @color_rebuild_pending = true
       suspend_background_lod_build_for_color!(generation)
 
       scheduler = MainThreadScheduler.instance
       launcher = lambda do
-        @color_rebuild_task = scheduler.schedule(name: 'color-rebuild', priority: 200, cancel_if: -> { @cache_dirty }) do |context|
+        @color_rebuild_task = scheduler.schedule(name: 'color-rebuild',
+                                                 priority: 200,
+                                                 cancel_if: -> { stale_color_request?(generation, request_token) }) do |context|
           process_color_rebuild(context, generation)
         end
       end
@@ -2070,9 +2168,14 @@ module PointCloudImporter
       if debounce
         @color_rebuild_debounce_task = scheduler.schedule(name: 'color-rebuild-debounce',
                                                           priority: 50,
-                                                          delay: COLOR_DEBOUNCE_INTERVAL) do
-          launcher.call
-          :done
+                                                          delay: COLOR_DEBOUNCE_INTERVAL,
+                                                          cancel_if: -> { stale_color_request?(generation, request_token) }) do
+          if stale_color_request?(generation, request_token)
+            :done
+          else
+            launcher.call
+            :done
+          end
         end
       else
         launcher.call
@@ -2609,6 +2712,7 @@ module PointCloudImporter
       @color_rebuild_pending = false
       @color_rebuild_task = nil
       @color_rebuild_state = nil
+      @active_color_request_token = nil
       throttled_view_invalidate
     end
 
