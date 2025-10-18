@@ -4,11 +4,13 @@
 require 'stringio'
 
 require_relative 'progress_estimator'
+require_relative 'io_utils'
 
 module PointCloudImporter
     # Parser for PLY point cloud files (ASCII, binary little endian or binary big endian).
   class PlyParser
     UnsupportedFormat = Class.new(StandardError)
+    FileAccessError = Class.new(StandardError)
     Cancelled = Class.new(StandardError)
 
     DEFAULT_CHUNK_SIZE = 100_000
@@ -74,6 +76,10 @@ module PointCloudImporter
       @metadata = {}
       @estimated_progress = 0.0
       @progress_estimator = ProgressEstimator.new(min_interval: PROGRESS_REPORT_INTERVAL)
+      @header_preview = prevalidate_header! || {}
+      if @header_preview[:vertex_count]
+        @total_vertex_count = @header_preview[:vertex_count].to_i
+      end
     end
 
     def parse(chunk_size: nil, &block)
@@ -104,7 +110,7 @@ module PointCloudImporter
                   end
                 end
 
-      File.open(path, 'rb') do |io|
+      IOUtils.open_read(path) do |io|
         header = parse_header(io)
         @total_vertex_count = header[:vertex_count] ? header[:vertex_count].to_i : 0
         @metadata = header[:metadata] || {}
@@ -122,6 +128,8 @@ module PointCloudImporter
         report_progress(force: true)
 
         validate_header!(header)
+
+        ensure_header_consistency!(header)
 
         case header[:format]
         when :ascii
@@ -142,6 +150,8 @@ module PointCloudImporter
         intensities_result = has_intensity ? collector_intensities : nil
         [collector_points, colors_result, intensities_result, @metadata]
       end
+    rescue IOUtils::AccessError, IOUtils::NotFoundError => e
+      raise FileAccessError, e.message
     end
 
     private
@@ -159,9 +169,10 @@ module PointCloudImporter
     def parse_header(io)
       header = { properties: [], metadata: {} }
       format_line = io.gets&.strip
-      raise UnsupportedFormat, 'Не PLY файл' unless format_line == 'ply'
+      raise UnsupportedFormat, 'Не PLY файл' unless format_line && format_line.casecmp('ply').zero?
 
       current_element = nil
+      header_ended = false
 
       until (line = io.gets&.strip).nil?
         case line
@@ -195,13 +206,85 @@ module PointCloudImporter
           property_name = Regexp.last_match(2).downcase
           position = header[:properties].length
           header[:properties] << { type: property_type, name: property_name, position: position }
-        when 'end_header'
+        when /^end_header$/i
+          header_ended = true
           break
         end
       end
       raise UnsupportedFormat, 'Неизвестный формат PLY.' unless header[:format]
+      raise UnsupportedFormat, 'Заголовок PLY не содержит элемент "element vertex".' unless header[:vertex_count]
+      raise UnsupportedFormat, 'Заголовок PLY не завершен (end_header отсутствует).' unless header_ended
       header[:property_index_by_name] = build_property_index(header[:properties])
       header
+    end
+
+    def ensure_header_consistency!(header)
+      return unless @header_preview
+
+      if @header_preview[:format] && header[:format] && header[:format] != @header_preview[:format]
+        raise UnsupportedFormat, 'Формат PLY изменился после предварительной проверки.'
+      end
+
+      preview_count = @header_preview[:vertex_count]
+      return unless preview_count
+
+      actual_count = header[:vertex_count]
+      return if actual_count.nil?
+
+      unless actual_count.to_i == preview_count.to_i
+        raise UnsupportedFormat, 'Количество вершин изменилось после предварительной проверки.'
+      end
+    end
+
+    def prevalidate_header!
+      preview = IOUtils.open_read(path) do |io|
+        parse_header_preview(io)
+      end
+
+      preview
+    rescue IOUtils::AccessError, IOUtils::NotFoundError => e
+      raise FileAccessError, e.message
+    end
+
+    def parse_header_preview(io)
+      first_line = io.gets
+      raise UnsupportedFormat, 'Не PLY файл' unless first_line && first_line.strip.casecmp('ply').zero?
+
+      format = nil
+      vertex_count = nil
+      header_ended = false
+
+      until (line = io.gets).nil?
+        stripped = line.strip
+        case stripped
+        when /^format\s+(ascii|binary_little_endian|binary_big_endian)\b/i
+          format =
+            case Regexp.last_match(1).downcase
+            when 'ascii' then :ascii
+            when 'binary_little_endian' then :binary_little
+            when 'binary_big_endian' then :binary_big
+            end
+        when /^element\s+vertex\s+(\d+)/i
+          vertex_count = Regexp.last_match(1).to_i
+        when /^end_header$/i
+          header_ended = true
+          break
+        end
+      end
+
+      raise UnsupportedFormat, 'Заголовок PLY не содержит поддерживаемый формат.' unless format
+      raise UnsupportedFormat, 'Заголовок PLY не содержит элемент "element vertex".' if vertex_count.nil?
+      raise UnsupportedFormat, 'Заголовок PLY не завершен (end_header отсутствует).' unless header_ended
+
+      {
+        format: format,
+        vertex_count: vertex_count,
+        endian: case format
+                when :binary_big then :big
+                when :binary_little then :little
+                else nil
+                end
+      }
     end
 
     def parse_ascii(io, header, chunk_size, &block)
