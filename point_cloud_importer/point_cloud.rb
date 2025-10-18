@@ -185,6 +185,98 @@ module PointCloudImporter
       ].freeze
     }.freeze
 
+    class << self
+      def pack_rgb(r, g, b)
+        return nil if r.nil? || g.nil? || b.nil?
+
+        r_value = r.to_i & 0xff
+        g_value = g.to_i & 0xff
+        b_value = b.to_i & 0xff
+        (r_value << 16) | (g_value << 8) | b_value
+      rescue StandardError
+        nil
+      end
+
+      def unpack_rgb(value)
+        return nil if value.nil?
+
+        masked = value.to_i & PACKED_COLOR_MASK
+        [
+          (masked >> 16) & 0xff,
+          (masked >> 8) & 0xff,
+          masked & 0xff
+        ]
+      rescue StandardError
+        nil
+      end
+
+      def gradient_lut_for(key)
+        cache = gradient_lut_cache
+        effective_key = key || COLOR_GRADIENTS.keys.first
+        effective_key ||= COLOR_GRADIENTS.keys.first
+
+        cache.fetch(effective_key) do
+          cache[effective_key] = build_gradient_lut(effective_key)
+        end
+      end
+
+      private
+
+      def gradient_lut_cache
+        @gradient_lut_cache ||= {}
+      end
+
+      def build_gradient_lut(key)
+        stops = COLOR_GRADIENTS[key] || COLOR_GRADIENTS[:viridis]
+        return [].freeze unless stops && !stops.empty?
+
+        lut = Array.new(GRADIENT_LUT_SIZE) do |index|
+          t = if GRADIENT_LUT_SIZE <= 1
+                0.0
+              else
+                index.to_f / (GRADIENT_LUT_SIZE - 1)
+              end
+
+          lower = stops.first
+          upper = stops.last
+
+          stops.each do |stop|
+            if t <= stop[0]
+              upper = stop
+              break
+            end
+            lower = stop
+          end
+
+          lower_color = Array(lower && lower[1])
+          upper_color = Array(upper && upper[1])
+
+          if upper == lower
+            pack_rgb(lower_color[0], lower_color[1], lower_color[2]) || DEFAULT_PACKED_COLOR
+          else
+            range = upper[0] - lower[0]
+            weight = range.abs < Float::EPSILON ? 0.0 : (t - lower[0]) / range
+            r = interpolate_component(lower_color[0], upper_color[0], weight)
+            g = interpolate_component(lower_color[1], upper_color[1], weight)
+            b = interpolate_component(lower_color[2], upper_color[2], weight)
+            pack_rgb(r, g, b) || DEFAULT_PACKED_COLOR
+          end
+        end
+
+        lut.freeze
+      end
+
+      def interpolate_component(min_component, max_component, weight)
+        min_value = min_component.to_f
+        max_value = max_component.to_f
+        return min_value.to_i & 0xff if weight.nil?
+
+        (min_value + ((max_value - min_value) * weight.to_f)).round.clamp(0, 255)
+      rescue StandardError
+        min_component.to_i & 0xff
+      end
+    end
+
     def initialize(name:, points: nil, colors: nil, intensities: nil, metadata: {}, chunk_capacity: nil,
                    settings_snapshot: nil)
       @settings_snapshot = settings_snapshot
@@ -213,6 +305,7 @@ module PointCloudImporter
       @color_mode = normalize_color_mode(@settings[:color_mode])
       @color_gradient = normalize_color_gradient(@settings[:color_gradient])
       @single_color = parse_color_setting(@settings[:single_color])
+      @packed_single_color = nil
       @display_points = nil
       @display_colors = nil
       @display_index_lookup = nil
@@ -256,6 +349,7 @@ module PointCloudImporter
       @bounds_max_x = nil
       @bounds_max_y = nil
       @bounds_max_z = nil
+      @bbox_cache = {}
       @cache_dirty = false
       @render_cache_preparation_pending = false
       @manager_ref = nil
@@ -315,6 +409,7 @@ module PointCloudImporter
       @bounds_max_x = nil
       @bounds_max_y = nil
       @bounds_max_z = nil
+      @bbox_cache = nil
       @octree_mutex = nil
       @manager_ref = nil
       cancel_color_rebuild!
@@ -488,6 +583,7 @@ module PointCloudImporter
       return if colors_equal?(@single_color, color)
 
       @single_color = color
+      @packed_single_color = nil
       settings = Settings.instance
       settings[:single_color] = color_to_hex(@single_color)
 
@@ -498,6 +594,14 @@ module PointCloudImporter
 
     def single_color
       @single_color ||= parse_color_setting(DEFAULT_SINGLE_COLOR_HEX)
+    end
+
+    def packed_single_color
+      color = single_color
+      @packed_single_color ||= begin
+        packed = pack_color_value(color)
+        packed.nil? ? DEFAULT_PACKED_COLOR : packed
+      end
     end
 
     def has_original_colors?
@@ -1178,6 +1282,7 @@ module PointCloudImporter
       end
 
       @bounding_box_dirty = true
+      @bbox_cache = nil
       true
     end
 
@@ -1267,6 +1372,7 @@ module PointCloudImporter
       end
 
       @bounding_box_dirty = true
+      @bbox_cache = nil
     end
 
     def invalidate_color_geometry!
@@ -1279,6 +1385,7 @@ module PointCloudImporter
       @normalized_intensity_cache = nil
       @scalar_cache_generation = 0
       @scalar_cache_signature = nil
+      @bbox_cache = nil
     end
 
     AXIS_INDICES = { x: 0, y: 1, z: 2 }.freeze
@@ -1335,12 +1442,7 @@ module PointCloudImporter
       if stored.respond_to?(:red) && stored.respond_to?(:green) && stored.respond_to?(:blue)
         [stored.red.to_i, stored.green.to_i, stored.blue.to_i]
       elsif stored.is_a?(Integer)
-        value = stored & PACKED_COLOR_MASK
-        [
-          (value >> 16) & 0xff,
-          (value >> 8) & 0xff,
-          value & 0xff
-        ]
+        self.class.unpack_rgb(stored)
       elsif stored.is_a?(Array)
         r = stored[0]
         g = stored[1]
@@ -1367,15 +1469,7 @@ module PointCloudImporter
     def pack_color_components(components)
       return nil unless components
 
-      r = components[0]
-      g = components[1]
-      b = components[2]
-      return nil if r.nil? || g.nil? || b.nil?
-
-      r_value = r.to_i & 0xff
-      g_value = g.to_i & 0xff
-      b_value = b.to_i & 0xff
-      (r_value << 16) | (g_value << 8) | b_value
+      self.class.pack_rgb(components[0], components[1], components[2])
     rescue StandardError
       nil
     end
@@ -1603,7 +1697,7 @@ module PointCloudImporter
       when :intensity
         packed_gradient_color(normalized_intensity_for(index))
       when :single
-        pack_color_value(@single_color) || DEFAULT_PACKED_COLOR
+        packed_single_color
       when :random
         packed_random_color(index)
       when :rgb_xyz
@@ -1675,60 +1769,13 @@ module PointCloudImporter
     def gradient_lut
       key = @color_gradient || COLOR_GRADIENTS.keys.first
       key ||= COLOR_GRADIENTS.keys.first
-      return @gradient_lut if @gradient_lut && @gradient_lut_key == key
-
-      build_gradient_lut(key)
-    end
-
-    def build_gradient_lut(key)
-      stops = COLOR_GRADIENTS[key] || COLOR_GRADIENTS[:viridis]
-      return nil unless stops && !stops.empty?
-
-      lut = Array.new(GRADIENT_LUT_SIZE) do |index|
-        t = if GRADIENT_LUT_SIZE <= 1
-              0.0
-            else
-              index.to_f / (GRADIENT_LUT_SIZE - 1)
-            end
-
-        lower = stops.first
-        upper = stops.last
-
-        stops.each do |stop|
-          if t <= stop[0]
-            upper = stop
-            break
-          end
-          lower = stop
-        end
-
-        lower_color = Array(lower && lower[1])
-        upper_color = Array(upper && upper[1])
-
-        if upper == lower
-          pack_color_components(lower_color) || DEFAULT_PACKED_COLOR
-        else
-          range = upper[0] - lower[0]
-          weight = range.abs < Float::EPSILON ? 0.0 : (t - lower[0]) / range
-          r = interpolate_component(lower_color[0], upper_color[0], weight)
-          g = interpolate_component(lower_color[1], upper_color[1], weight)
-          b = interpolate_component(lower_color[2], upper_color[2], weight)
-          pack_color_components([r, g, b]) || DEFAULT_PACKED_COLOR
-        end
+      if @gradient_lut && @gradient_lut_key == key
+        @gradient_lut
+      else
+        lut = self.class.send(:gradient_lut_for, key)
+        @gradient_lut_key = key
+        @gradient_lut = lut
       end
-
-      @gradient_lut_key = key
-      @gradient_lut = lut
-    end
-
-    def interpolate_component(min_component, max_component, weight)
-      min_value = min_component.to_f
-      max_value = max_component.to_f
-      return min_value.to_i & 0xff if weight.nil?
-
-      (min_value + ((max_value - min_value) * weight.to_f)).round.clamp(0, 255)
-    rescue StandardError
-      min_component.to_i & 0xff
     end
 
     def packed_gradient_color(value)
@@ -1762,7 +1809,7 @@ module PointCloudImporter
       g = (lg + ((ug - lg) * fraction)).round.clamp(0, 255)
       b = (lb + ((ub - lb) * fraction)).round.clamp(0, 255)
 
-      (r << 16) | (g << 8) | b
+      self.class.pack_rgb(r, g, b) || DEFAULT_PACKED_COLOR
     rescue StandardError
       DEFAULT_PACKED_COLOR
     end
@@ -1938,32 +1985,62 @@ module PointCloudImporter
       0.0
     end
 
+    def bounding_box_extents
+      cache = (@bbox_cache ||= {})
+      generation = @color_geometry_generation
+      return cache if cache[:version] == generation && cache.key?(:min)
+
+      min_x = @bounds_min_x
+      min_y = @bounds_min_y
+      min_z = @bounds_min_z
+      max_x = @bounds_max_x
+      max_y = @bounds_max_y
+      max_z = @bounds_max_z
+
+      if [min_x, min_y, min_z, max_x, max_y, max_z].any?(&:nil?)
+        cache[:min] = nil
+        cache[:max] = nil
+        cache[:range] = nil
+      else
+        min = [min_x.to_f, min_y.to_f, min_z.to_f].freeze
+        max = [max_x.to_f, max_y.to_f, max_z.to_f].freeze
+        range = [max[0] - min[0], max[1] - min[1], max[2] - min[2]].freeze
+        cache[:min] = min
+        cache[:max] = max
+        cache[:range] = range
+      end
+
+      cache[:version] = generation
+      cache
+    rescue StandardError
+      @bbox_cache = { version: generation }
+      @bbox_cache
+    end
+
     def color_bounds
       generation = @color_geometry_generation
       cache_generation = @cached_color_bounds_generation
       cached = @cached_color_bounds
 
       if cache_generation != generation || cached.nil?
-        min_x = @bounds_min_x
-        min_y = @bounds_min_y
-        min_z = @bounds_min_z
-        max_x = @bounds_max_x
-        max_y = @bounds_max_y
-        max_z = @bounds_max_z
+        extents = bounding_box_extents
+        min = extents[:min]
+        max = extents[:max]
+        range = extents[:range]
 
-        if [min_x, min_y, min_z, max_x, max_y, max_z].any?(&:nil?)
+        if min.nil? || max.nil? || range.nil?
           cached = nil
         else
           cached = {
-            min_x: min_x,
-            min_y: min_y,
-            min_z: min_z,
-            max_x: max_x,
-            max_y: max_y,
-            max_z: max_z,
-            range_x: max_x - min_x,
-            range_y: max_y - min_y,
-            range_z: max_z - min_z
+            min_x: min[0],
+            min_y: min[1],
+            min_z: min[2],
+            max_x: max[0],
+            max_y: max[1],
+            max_z: max[2],
+            range_x: range[0],
+            range_y: range[1],
+            range_z: range[2]
           }
         end
 
@@ -3935,6 +4012,7 @@ module PointCloudImporter
       @bounds_max_z = max_z
 
       @bounding_box_dirty = true
+      @bbox_cache = nil
     end
 
     def compute_bounds!

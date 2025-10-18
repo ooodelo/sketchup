@@ -42,10 +42,10 @@ module PointCloudImporter
       end
     end
 
-    def each_with_yield(interval = nil)
-      return enum_for(:each_with_yield, interval) unless block_given?
+    def each_with_yield(yield_every = nil)
+      return enum_for(:each_with_yield, yield_every) unless block_given?
 
-      step = resolve_yield_interval(interval)
+      step = resolve_yield_interval(yield_every)
       counter = 0
 
       each do |value|
@@ -86,18 +86,20 @@ module PointCloudImporter
       @length.zero?
     end
 
-    def append_chunk(values)
-      append_batch!(values)
+    def append_chunk(values, yield_every: nil)
+      append_batch!(values, yield_every: yield_every)
     end
 
-    def append_batch!(values, valid_length = nil, yield_interval: nil)
+    def append_batch!(values, valid_length = nil, yield_interval: nil, yield_every: nil)
       return if values.nil?
 
       length = valid_length ? valid_length.to_i : values.length
       length = values.length if length > values.length
       return if length <= 0
 
-      step = resolve_yield_interval(yield_interval || APPEND_YIELD_INTERVAL)
+      interval = yield_every
+      interval = yield_interval if interval.nil?
+      step = resolve_yield_interval(interval || APPEND_YIELD_INTERVAL)
       counter = 0
 
       index = 0

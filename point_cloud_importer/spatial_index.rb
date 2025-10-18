@@ -258,16 +258,21 @@ module PointCloudImporter
         max_z = [max_z, point.z].max
       end
 
-      {
-        min: [min_x, min_y, min_z],
-        max: [max_x, max_y, max_z]
-      }
+      min = [min_x, min_y, min_z]
+      max = [max_x, max_y, max_z]
+      range = [
+        max_x - min_x,
+        max_y - min_y,
+        max_z - min_z
+      ]
+
+      { min: min, max: max, range: range }
     end
 
     def sah_split(entries, bounds)
       return [nil, nil] if entries.length < SAH_MIN_SIZE || bounds.nil?
 
-      extents = (0..2).map { |axis| bounds[:max][axis] - bounds[:min][axis] }
+      extents = bounds[:range] || (0..2).map { |axis| bounds[:max][axis] - bounds[:min][axis] }
       max_extent = extents.max
       min_extent = extents.reject { |extent| extent <= 1e-9 }.min
 
@@ -360,9 +365,14 @@ module PointCloudImporter
     end
 
     def surface_area(bounds)
-      x = bounds[:max][0] - bounds[:min][0]
-      y = bounds[:max][1] - bounds[:min][1]
-      z = bounds[:max][2] - bounds[:min][2]
+      range = bounds[:range]
+      if range
+        x, y, z = range
+      else
+        x = bounds[:max][0] - bounds[:min][0]
+        y = bounds[:max][1] - bounds[:min][1]
+        z = bounds[:max][2] - bounds[:min][2]
+      end
 
       x = 0.0 if x.nan?
       y = 0.0 if y.nan?
@@ -380,23 +390,31 @@ module PointCloudImporter
       return b unless a
       return a unless b
 
+      min = [
+        [a[:min][0], b[:min][0]].min,
+        [a[:min][1], b[:min][1]].min,
+        [a[:min][2], b[:min][2]].min
+      ]
+      max = [
+        [a[:max][0], b[:max][0]].max,
+        [a[:max][1], b[:max][1]].max,
+        [a[:max][2], b[:max][2]].max
+      ]
+
       {
-        min: [
-          [a[:min][0], b[:min][0]].min,
-          [a[:min][1], b[:min][1]].min,
-          [a[:min][2], b[:min][2]].min
-        ],
-        max: [
-          [a[:max][0], b[:max][0]].max,
-          [a[:max][1], b[:max][1]].max,
-          [a[:max][2], b[:max][2]].max
+        min: min,
+        max: max,
+        range: [
+          max[0] - min[0],
+          max[1] - min[1],
+          max[2] - min[2]
         ]
       }
     end
 
     def point_bounds(point)
       coords = [point.x, point.y, point.z]
-      { min: coords.dup, max: coords.dup }
+      { min: coords.dup, max: coords.dup, range: [0.0, 0.0, 0.0] }
     end
 
     def find_pivot(entries, axis, value)
