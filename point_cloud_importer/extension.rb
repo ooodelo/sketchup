@@ -5,6 +5,7 @@ require 'sketchup.rb'
 
 require_relative 'threading'
 require_relative 'settings'
+require_relative 'importer'
 require_relative 'manager'
 require_relative 'main_thread_queue'
 require_relative 'ui/commands'
@@ -272,6 +273,14 @@ module PointCloudImporter
     def activate
       Threading.register_ui_thread!
       PointCloudImporter::MainThreadScheduler.instance.ensure_started
+      PointCloudImporter::Logger.debug do
+        location = PointCloudImporter::Importer.instance_method(:run_job).source_location
+        "Importer#run_job from: #{location.inspect}"
+      end
+      PointCloudImporter::Logger.debug do
+        location = PointCloudImporter::MainThreadScheduler.instance_method(:schedule).source_location
+        "MainThreadScheduler#schedule from: #{location.inspect}"
+      end
 
       PointCloudImporter::Logger.debug do
         model = Sketchup.active_model
