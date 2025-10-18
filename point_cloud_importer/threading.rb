@@ -13,14 +13,17 @@ module PointCloudImporter
     module_function
 
     THREAD_ROLE_KEY = :point_cloud_importer_role
+    THREAD_NAME_KEY = :name
 
     def register_ui_thread!(thread = Thread.current)
       @ui_thread = thread
       set_role(thread, :ui)
+      set_thread_name(thread, 'ui')
     end
 
     def register_background_thread!(thread = Thread.current)
       set_role(thread, :bg)
+      set_thread_name(thread, 'bg') unless thread[THREAD_NAME_KEY]
     end
 
     def guard(expected_role, message: nil)
@@ -71,6 +74,8 @@ module PointCloudImporter
       Thread.new do
         Thread.current.abort_on_exception = false
         register_background_thread!
+        background_name = name.to_s.empty? ? 'background' : name.to_s
+        set_thread_name(Thread.current, "bg:#{background_name}")
 
         begin
           guard(:bg, message: name)
@@ -81,7 +86,7 @@ module PointCloudImporter
           end
           notify_failure(dispatcher, on_failure, violation)
         rescue StandardError => error
-          Logger.debug do
+          Logger.error do
             <<~LOG.chomp
               Background task #{name} failed: #{error.class}: #{error.message}
               #{Array(error.backtrace).join("\n")}
@@ -122,7 +127,7 @@ module PointCloudImporter
       begin
         on_failure&.call(error)
       rescue StandardError => callback_error
-        Logger.debug do
+        Logger.error do
           "Failure callback crashed: #{callback_error.class}: #{callback_error.message}"
         end
       end
@@ -130,12 +135,19 @@ module PointCloudImporter
       begin
         dispatcher.call(:failed, error) if dispatcher
       rescue StandardError => dispatch_error
-        Logger.debug do
+        Logger.error do
           "Failure dispatcher crashed: #{dispatch_error.class}: #{dispatch_error.message}"
         end
       end
     end
     private_class_method :notify_failure
+
+    def set_thread_name(thread, name)
+      thread[THREAD_NAME_KEY] = name
+    rescue StandardError
+      nil
+    end
+    private_class_method :set_thread_name
   end
 end
 
