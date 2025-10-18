@@ -20,26 +20,21 @@ module PointCloudImporter
       return unless text
 
       now = Clock.monotonic
+      thread_label = current_thread_label
 
       synchronize do
-        append_to_log(text)
+        enabled = logging_enabled?
+        flush_repeated(now, reason: :timeout, enabled: enabled)
 
-        unless logging_enabled?
-          @last_emit_at = now
-          next
-        end
-
-        flush_repeated(now, reason: :timeout)
-
-        if repeated_message?(text)
+        if repeated_message?(text, thread_label)
           @repeat_count += 1
           @last_repeat_at = now
           next
         end
 
-        flush_repeated(now, reason: :change)
-        emit_to_console(text, now)
-        remember_message(text, now)
+        flush_repeated(now, reason: :change, enabled: enabled)
+        emit_message(text, now, thread_label, enabled)
+        remember_message(text, now, thread_label)
       end
     rescue StandardError
       nil
@@ -50,11 +45,13 @@ module PointCloudImporter
       return unless text
 
       now = Clock.monotonic
+      thread_label = current_thread_label
 
       synchronize do
-        append_to_log(text)
-        emit_to_console(text, now)
-        remember_message(text, now)
+        enabled = logging_enabled?
+        flush_repeated(now, reason: :change, enabled: enabled)
+        emit_message(text, now, thread_label, enabled)
+        remember_message(text, now, thread_label)
       end
     rescue StandardError
       nil
@@ -87,18 +84,25 @@ module PointCloudImporter
     end
     private_class_method :mutex
 
-    def emit_to_console(text, now)
+    def emit_to_console(text, now, thread_label)
       timestamp = Clock.now.strftime('%H:%M:%S')
-      ::Kernel.puts("[PointCloudImporter #{timestamp}] #{text}")
+      label_segment = thread_label ? " #{thread_label}" : ''
+      ::Kernel.puts("[PointCloudImporter #{timestamp}#{label_segment}] #{text}")
       @last_emit_at = now
     end
     private_class_method :emit_to_console
 
-    def append_to_log(text)
+    def emit_message(text, now, thread_label, enabled)
+      append_to_log(text, thread_label)
+      emit_to_console(text, now, thread_label) if enabled
+    end
+    private_class_method :emit_message
+
+    def append_to_log(text, thread_label)
       path = log_path
       return unless path
 
-      line = format_log_line(text)
+      line = format_log_line(text, thread_label)
       FileUtils.mkdir_p(File.dirname(path))
       File.open(path, 'a:UTF-8') { |file| file.puts(line) }
       path
@@ -107,9 +111,10 @@ module PointCloudImporter
     end
     private_class_method :append_to_log
 
-    def format_log_line(text)
+    def format_log_line(text, thread_label)
       timestamp = Clock.now.strftime('%Y-%m-%d %H:%M:%S')
-      "[PointCloudImporter #{timestamp}] #{text}"
+      label_segment = thread_label ? " #{thread_label}" : ''
+      "[PointCloudImporter #{timestamp}#{label_segment}] #{text}"
     end
     private_class_method :format_log_line
 
@@ -126,35 +131,45 @@ module PointCloudImporter
       end
     end
 
-    def remember_message(text, now)
+    def remember_message(text, now, thread_label)
       @last_message = text
       @repeat_count = 0
       @last_repeat_at = now
+      @repeat_start_at = now
+      @last_thread_label = thread_label
     end
     private_class_method :remember_message
 
-    def repeated_message?(text)
-      @last_message == text
+    def repeated_message?(text, thread_label)
+      @last_message == text && @last_thread_label == thread_label
     end
     private_class_method :repeated_message?
 
-    def flush_repeated(now, reason:)
+    def flush_repeated(now, reason:, enabled: true)
       return unless @last_message
       return if @repeat_count.to_i.zero?
 
       return if reason == :timeout && recent_repeat?(now)
 
+      elapsed = [now - (@repeat_start_at || now), 0.0].max
+      elapsed = 0.001 if elapsed.zero?
+      rate = @repeat_count / elapsed
+
       summary = format(
-        '%<message>s (повторено ещё %<count>d раз)',
+        '%<message>s (повторено ещё %<count>d раз за %<elapsed>.2f с, %<rate>.2f/с)',
         message: @last_message,
-        count: @repeat_count
+        count: @repeat_count,
+        elapsed: elapsed,
+        rate: rate
       )
 
-      append_to_log(summary)
-      emit_to_console(summary, now)
+      append_to_log(summary, @last_thread_label)
+      emit_to_console(summary, now, @last_thread_label) if enabled
       @repeat_count = 0
       @last_message = nil
       @last_repeat_at = nil
+      @repeat_start_at = nil
+      @last_thread_label = nil
     end
     private_class_method :flush_repeated
 
@@ -168,8 +183,44 @@ module PointCloudImporter
     end
     private_class_method :recent_repeat?
 
+    def current_thread_label
+      thread_label_for(Thread.current)
+    end
+    private_class_method :current_thread_label
+
+    def thread_label_for(thread)
+      name = safe_thread_attribute(thread, :name)
+      return name if name
+
+      role = safe_thread_attribute(thread, :point_cloud_importer_role)
+      return role if role
+
+      format('thread:%#x', thread.object_id)
+    rescue StandardError
+      'thread:unknown'
+    end
+    private_class_method :thread_label_for
+
+    def safe_thread_attribute(thread, key)
+      value = thread[key]
+      return nil if value.nil?
+
+      string = value.to_s
+      string.empty? ? nil : string
+    rescue StandardError
+      nil
+    end
+    private_class_method :safe_thread_attribute
+
     at_exit do
-      synchronize { flush_repeated(Clock.monotonic, reason: :exit) }
+      synchronize do
+        enabled = begin
+          logging_enabled?
+        rescue StandardError
+          true
+        end
+        flush_repeated(Clock.monotonic, reason: :exit, enabled: enabled)
+      end
     end
   end
 end

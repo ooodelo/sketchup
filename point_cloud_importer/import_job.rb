@@ -113,13 +113,18 @@ module PointCloudImporter
     end
 
     def fail!(error)
-      transition_to(:failed, reason: error)
+      normalized = normalize_error(error)
+      transition_to(:failed, reason: normalized)
       @mutex.synchronize do
         @status = :failed
-        @error = error
-        @message = error.message.to_s
+        @error = normalized
+        @message = normalized.message.to_s
       end
-      Logger.debug { "Задание завершилось ошибкой: #{error.class}: #{error.message}" }
+      Logger.error do
+        backtrace = Array(normalized.backtrace)
+        details = backtrace.empty? ? '' : "\n#{backtrace.join("\n")}"
+        "Задание завершилось ошибкой: #{normalized.class}: #{normalized.message}#{details}"
+      end
     end
 
     def complete!(result)
@@ -175,6 +180,21 @@ module PointCloudImporter
     def mark_cloud_added!
       @mutex.synchronize { @cloud_added = true }
     end
+
+    def normalize_error(error)
+      return error if error.is_a?(Exception)
+
+      message = begin
+        error.to_s
+      rescue StandardError
+        nil
+      end
+
+      RuntimeError.new(message.nil? || message.empty? ? 'Неизвестная ошибка импорта' : message)
+    rescue StandardError => e
+      RuntimeError.new("Не удалось обработать ошибку импорта: #{e.message}")
+    end
+    private :normalize_error
 
     def finished?
       @mutex.synchronize { finished_locked? }
