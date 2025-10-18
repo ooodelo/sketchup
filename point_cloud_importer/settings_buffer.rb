@@ -52,8 +52,16 @@ module PointCloudImporter
       end
 
       pending.each do |namespace, values|
-        values.each do |key, value|
-          Sketchup.write_default(namespace, key, value)
+        if defined?(PointCloudImporter::Settings) &&
+           namespace == PointCloudImporter::Settings::PREFERENCES_NAMESPACE
+          normalized = PointCloudImporter::Settings.normalize!(values)
+          normalized.each do |key, value|
+            Sketchup.write_default(namespace, key.to_s, value)
+          end
+        else
+          values.each do |key, value|
+            Sketchup.write_default(namespace, key, value)
+          end
         end
       end
     end
