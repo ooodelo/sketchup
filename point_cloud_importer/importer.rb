@@ -4,6 +4,7 @@
 require 'stringio'
 require 'thread'
 require 'securerandom'
+require 'uri'
 
 require_relative 'settings'
 require_relative 'point_cloud'
@@ -465,6 +466,7 @@ module PointCloudImporter
 
     def run_job(job)
       Threading.guard(:ui, message: 'Importer#run_job')
+      MainThreadScheduler.instance.ensure_started
       @last_result = nil
       metrics_enabled_flag = metrics_enabled?
       metrics_state = {
@@ -481,7 +483,25 @@ module PointCloudImporter
         "Запуск импорта файла #{job.path.inspect} (#{formatted_options})"
       end
 
-      progress_dialog = UI::ImportProgressDialog.new(job) { job.cancel! }
+      progress_dialog_closed = false
+      finalization_complete = false
+
+      progress_dialog = UI::ImportProgressDialog.new(
+        job,
+        on_cancel: -> { job.cancel! },
+        on_close: lambda do
+          progress_dialog_closed = true
+          if job.finished?
+            finalize_job(job, notify: !job.failed?) unless finalization_complete
+          else
+            job.cancel!
+          end
+        end,
+        on_show_log: lambda do |path = nil|
+          candidate = path && !path.to_s.empty? ? path : Logger.log_path
+          open_log_file(candidate)
+        end
+      )
       progress_dialog.show
 
       job.on_progress { MainThreadDispatcher.enqueue { progress_dialog.update } }
@@ -503,12 +523,19 @@ module PointCloudImporter
       }
 
       worker_finished = false
-      progress_dialog_closed = false
-
       finalize_if_ready = lambda do
         return unless worker_finished && job.finished?
+        return if finalization_complete
+
+        if job.failed?
+          finalization_complete = true
+          finalize_job(job, notify: false)
+          return
+        end
+
         return if progress_dialog_closed
 
+        finalization_complete = true
         progress_dialog_closed = true
         progress_dialog.close
         finalize_job(job)
@@ -524,6 +551,7 @@ module PointCloudImporter
                                    metadata: payload[:metadata] || {},
                                    settings_snapshot: payload[:settings_snapshot])
             job.cloud = cloud
+            cloud.begin_import! if cloud.respond_to?(:begin_import!)
 
             if metrics_enabled_flag && !metrics_state[:assign_hooked]
               metrics_state[:assign_hooked] = install_assign_metrics(
@@ -574,6 +602,7 @@ module PointCloudImporter
             return if job.finished?
 
             if job.cancel_requested?
+              cloud_context[:cloud]&.abort_import!
               job.mark_cancelled!
               finalize_if_ready.call
               return
@@ -583,6 +612,7 @@ module PointCloudImporter
             return unless cloud
 
             cloud.finalize_bounds!
+            cloud.complete_import! if cloud.respond_to?(:complete_import!)
 
             metadata = (payload[:metadata] || {}).dup
             unit_scale = cloud_context[:unit_scale]
@@ -658,6 +688,7 @@ module PointCloudImporter
             error = payload
             unless job.finished?
               error ||= RuntimeError.new('Фоновый шаг завершился с ошибкой')
+              cloud_context[:cloud]&.abort_import!
               job.fail!(error)
             end
             finalize_if_ready.call
@@ -918,7 +949,7 @@ module PointCloudImporter
       job.thread = worker
     end
 
-    def finalize_job(job)
+    def finalize_job(job, notify: true)
       Logger.debug { "Финализация задания со статусом #{job.status.inspect}" }
       case job.status
       when :completed
@@ -927,11 +958,11 @@ module PointCloudImporter
         cleanup_partial_cloud(job)
         log_failure_details(job)
         @last_result = nil
-        ::UI.messagebox("Ошибка импорта: #{job.error.message}") if job.error
+        ::UI.messagebox("Ошибка импорта: #{job.error.message}") if notify && job.error
       when :cancelled
         cleanup_partial_cloud(job)
         @last_result = nil
-        ::UI.messagebox('Импорт отменен пользователем.')
+        ::UI.messagebox('Импорт отменен пользователем.') if notify
       else
         @last_result = nil
       end
@@ -1099,7 +1130,7 @@ module PointCloudImporter
     private :enqueue_sequence
 
     def log_failure_details(job)
-      Logger.debug do
+      Logger.error do
         error = job.error
         next 'Сообщение об ошибке отсутствует' unless error
 
@@ -1195,6 +1226,28 @@ module PointCloudImporter
           :pending
         end
       end
+    end
+
+    def open_log_file(path)
+      return false unless path && !path.to_s.empty?
+      return false unless defined?(::UI) && ::UI.respond_to?(:openURL)
+
+      normalized = path.to_s.encode('UTF-8')
+      normalized = normalized.tr('\\', '/')
+      escaped = URI::DEFAULT_PARSER.escape(normalized, /[^-\w.\/:]/)
+      url = if escaped.start_with?('file://')
+              escaped
+            elsif escaped.start_with?('/')
+              "file://#{escaped}"
+            else
+              "file:///#{escaped}"
+            end
+
+      ::UI.openURL(url)
+      true
+    rescue StandardError => e
+      Logger.debug { "Не удалось открыть лог импорта: #{e.class}: #{e.message}" }
+      false
     end
 
     def prompt_options

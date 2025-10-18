@@ -11,6 +11,7 @@ module PointCloudImporter
     include Enumerable
 
     DEFAULT_CHUNK_CAPACITY = Settings::DEFAULTS[:chunk_capacity]
+    DEFAULT_YIELD_INTERVAL = Settings::DEFAULTS[:yield_interval]
 
     attr_reader :chunk_capacity
 
@@ -38,6 +39,21 @@ module PointCloudImporter
         limit.times { |offset| yield(chunk[offset]) }
         remaining -= limit
       end
+    end
+
+    def each_with_yield(interval = nil)
+      return enum_for(:each_with_yield, interval) unless block_given?
+
+      step = resolve_yield_interval(interval)
+      counter = 0
+
+      each do |value|
+        yield(value)
+        counter += 1
+        yield_to_scheduler if step.positive? && (counter % step).zero?
+      end
+
+      self
     end
 
     def [](index)
@@ -135,6 +151,32 @@ module PointCloudImporter
     end
 
     private
+
+    def resolve_yield_interval(interval)
+      candidate = interval
+      candidate = config_yield_interval if candidate.nil? || candidate.to_i <= 0
+      candidate = DEFAULT_YIELD_INTERVAL if candidate.nil? || candidate.to_i <= 0
+      value = candidate.to_i
+      value = DEFAULT_YIELD_INTERVAL if value <= 0
+      value
+    rescue StandardError
+      DEFAULT_YIELD_INTERVAL
+    end
+
+    def config_yield_interval
+      return unless defined?(PointCloudImporter::Config)
+
+      PointCloudImporter::Config.sanitize_yield_interval(PointCloudImporter::Config.yield_interval)
+    rescue StandardError
+      nil
+    end
+
+    def yield_to_scheduler
+      Thread.pass
+      sleep(0)
+    rescue StandardError
+      nil
+    end
 
     def resolve_index(index)
       return nil unless index.is_a?(Integer)

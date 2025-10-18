@@ -129,7 +129,5 @@ module PointCloudImporter
       @last_emit_at = now
       @last_message = message
     end
-
-    public :ready_to_emit?, :mark_emitted
   end
 end

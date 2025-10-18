@@ -6,6 +6,7 @@ require 'sketchup.rb'
 require_relative 'threading'
 require_relative 'settings'
 require_relative 'manager'
+require_relative 'main_thread_queue'
 require_relative 'ui/commands'
 require_relative 'ui/first_import_wizard'
 
@@ -280,6 +281,7 @@ module PointCloudImporter
 
       PointCloudImporter::Settings.instance.load!
       PointCloudImporter::Config.load_from_settings(PointCloudImporter::Settings.instance)
+      PointCloudImporter::MainThreadScheduler.instance.ensure_started
       manager = PointCloudImporter::Manager.instance
       PointCloudImporter::UI::Commands.instance(manager).register!
       PointCloudImporter::UI::FirstImportWizard.show_if_needed(manager)

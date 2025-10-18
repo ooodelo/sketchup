@@ -48,6 +48,48 @@ module PointCloudImporter
       @manager_ref = manager
     end
 
+    def importing?
+      !!@importing
+    end
+
+    def begin_import!
+      @importing = true
+      @pending_import_tasks = {}
+      mark_post_import_task!(:display_cache)
+      self
+    end
+
+    def complete_import!(success: true, scheduler: MainThreadScheduler.instance)
+      @importing = false
+      pending = @pending_import_tasks || {}
+      @pending_import_tasks = {}
+
+      return self unless success
+
+      tasks = %i[display_cache color_refresh spatial_index].select { |task| pending[task] }
+      return self if tasks.empty?
+
+      runner = lambda do
+        tasks.each { |task| run_post_import_task(task) }
+      end
+
+      if scheduler
+        scheduler.enqueue(&runner)
+      else
+        runner.call
+      end
+
+      self
+    end
+
+    def abort_import!
+      @importing = false
+      @pending_import_tasks = {}
+      cancel_background_lod_build!
+      cancel_color_rebuild!
+      self
+    end
+
     POINT_STYLE_CANDIDATES = {
       square: %i[DRAW_POINTS_SQUARES DRAW_POINTS_SQUARE DRAW_POINTS_OPEN_SQUARE],
       round: %i[DRAW_POINTS_ROUND DRAW_POINTS_OPEN_CIRCLE],
@@ -197,6 +239,8 @@ module PointCloudImporter
       @intensity_min = nil
       @intensity_max = nil
       @random_seed = deterministic_seed_for(name)
+      @importing = false
+      @pending_import_tasks = {}
       @bounding_box = Geom::BoundingBox.new
       @bounding_box_dirty = false
       @bounds_min_x = nil
@@ -238,7 +282,7 @@ module PointCloudImporter
       @inference_sample_indices = nil
       @inference_mode = nil
       @user_max_display_points = @max_display_points
-      build_display_cache! if points && !points.empty?
+      mark_display_cache_dirty! if points && !points.empty?
 
       @finalizer_info = self.class.register_finalizer(self,
                                                       name: @name,
@@ -541,6 +585,8 @@ module PointCloudImporter
     end
 
     def prepare_render_cache!
+      return self if defer_import_task(:display_cache)
+
       ensure_display_caches!
       refresh_inference_guides!
       self
@@ -960,6 +1006,32 @@ module PointCloudImporter
     end
 
     private
+
+    def mark_post_import_task!(task)
+      @pending_import_tasks ||= {}
+      @pending_import_tasks[task] = true
+    end
+
+    def defer_import_task(task)
+      return false unless importing?
+
+      mark_post_import_task!(task)
+      true
+    end
+
+    def run_post_import_task(task)
+      case task
+      when :display_cache
+        build_display_cache!
+      when :color_refresh
+        refresh_color_buffers!
+      when :spatial_index
+        build_spatial_index!
+      end
+    rescue StandardError => e
+      Logger.debug { "Post-import task #{task} завершился с ошибкой: #{e.class}: #{e.message}" }
+      nil
+    end
 
     def mark_display_cache_dirty!
       return if @cache_dirty
@@ -1799,6 +1871,8 @@ module PointCloudImporter
     end
 
     def build_display_cache!
+      return if defer_import_task(:display_cache)
+
       finalize_bounds!
       @cache_dirty = false
       @spatial_index = nil
@@ -1845,6 +1919,8 @@ module PointCloudImporter
     end
 
     def ensure_display_caches!
+      return if defer_import_task(:display_cache)
+
       build_display_cache! if @cache_dirty || @lod_caches.nil?
 
       base_cache = @lod_caches&.fetch(LOD_LEVELS.first, nil)
@@ -1882,6 +1958,8 @@ module PointCloudImporter
     end
 
     def refresh_color_buffers!(debounce: false)
+      return if defer_import_task(:color_refresh)
+
       return build_display_cache! if @cache_dirty || @lod_caches.nil?
       return unless points && !points.empty?
 
@@ -2244,19 +2322,24 @@ module PointCloudImporter
       base_point_indices = []
       packed_colors = base_colors ? packed_color_cache_for_current_mode : nil
 
-      (0...points.length).step(step) do |index|
-        point = point3d_from(points[index])
-        next unless point
-
-        base_points << point
-        if base_colors
-          packed = packed_colors && index < packed_colors.length ? packed_colors[index] : nil
-          packed ||= packed_display_color_for_index(index)
-          base_colors << packed
+      index = 0
+      iterator = points.respond_to?(:each_with_yield) ? :each_with_yield : :each
+      points.public_send(iterator) do |raw_point|
+        if (index % step).zero?
+          point = point3d_from(raw_point)
+          if point
+            base_points << point
+            if base_colors
+              packed = packed_colors && index < packed_colors.length ? packed_colors[index] : nil
+              packed ||= packed_display_color_for_index(index)
+              base_colors << packed
+            end
+            base_index_lookup[index] = base_points.length - 1
+            base_point_indices << index
+            break if limit.positive? && base_points.length >= limit
+          end
         end
-        base_index_lookup[index] = base_points.length - 1
-        base_point_indices << index
-        break if limit.positive? && base_points.length >= limit
+        index += 1
       end
 
       create_cache(LOD_LEVELS.first,
@@ -3661,7 +3744,8 @@ module PointCloudImporter
       max_y = -Float::INFINITY
       max_z = -Float::INFINITY
 
-      points.each do |point|
+      iterator = points.respond_to?(:each_with_yield) ? :each_with_yield : :each
+      points.public_send(iterator) do |point|
         coords = point_coordinates(point)
         next unless coords
 
@@ -3701,6 +3785,8 @@ module PointCloudImporter
     end
 
     def build_spatial_index!
+      return if defer_import_task(:spatial_index)
+
       ensure_display_caches!
       return if @spatial_index
       return unless @display_points && !@display_points.empty?
