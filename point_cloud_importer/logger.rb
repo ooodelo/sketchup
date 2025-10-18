@@ -5,6 +5,8 @@ require 'thread'
 require 'tmpdir'
 require 'fileutils'
 
+require_relative 'clock'
+
 module PointCloudImporter
   # Simple logger that prints diagnostic messages to the Ruby console.
   module Logger
@@ -17,7 +19,7 @@ module PointCloudImporter
       text = block ? safe_call(block) : message
       return unless text
 
-      now = monotonic_time
+      now = Clock.monotonic
 
       synchronize do
         append_to_log(text)
@@ -47,7 +49,7 @@ module PointCloudImporter
       text = block ? safe_call(block) : message
       return unless text
 
-      now = monotonic_time
+      now = Clock.monotonic
 
       synchronize do
         append_to_log(text)
@@ -86,7 +88,7 @@ module PointCloudImporter
     private_class_method :mutex
 
     def emit_to_console(text, now)
-      timestamp = Time.now.strftime('%H:%M:%S')
+      timestamp = Clock.now.strftime('%H:%M:%S')
       ::Kernel.puts("[PointCloudImporter #{timestamp}] #{text}")
       @last_emit_at = now
     end
@@ -106,7 +108,7 @@ module PointCloudImporter
     private_class_method :append_to_log
 
     def format_log_line(text)
-      timestamp = Time.now.strftime('%Y-%m-%d %H:%M:%S')
+      timestamp = Clock.now.strftime('%Y-%m-%d %H:%M:%S')
       "[PointCloudImporter #{timestamp}] #{text}"
     end
     private_class_method :format_log_line
@@ -166,19 +168,8 @@ module PointCloudImporter
     end
     private_class_method :recent_repeat?
 
-    def monotonic_time
-      Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    rescue NameError, Errno::EINVAL
-      Process.clock_gettime(:float_second)
-    rescue NameError, ArgumentError, Errno::EINVAL
-      Process.clock_gettime(Process::CLOCK_REALTIME)
-    rescue NameError, Errno::EINVAL
-      Time.now.to_f
-    end
-    private_class_method :monotonic_time
-
     at_exit do
-      synchronize { flush_repeated(monotonic_time, reason: :exit) }
+      synchronize { flush_repeated(Clock.monotonic, reason: :exit) }
     end
   end
 end

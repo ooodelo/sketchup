@@ -8,6 +8,7 @@ require 'thread'
 require 'time'
 require 'tmpdir'
 
+require_relative 'clock'
 require_relative 'logger'
 require_relative 'settings'
 begin
@@ -78,9 +79,9 @@ module PointCloudImporter
     private
 
     def utc_timestamp
-      Time.now.utc.iso8601
+      Clock.now.utc.iso8601
     rescue StandardError
-      Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+      Clock.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')
     end
 
     def format_float(value)

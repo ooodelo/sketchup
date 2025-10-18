@@ -1,6 +1,7 @@
 # encoding: utf-8
 # frozen_string_literal: true
 
+require_relative 'clock'
 require_relative 'logger'
 require_relative 'threading'
 require_relative 'main_thread_queue'
@@ -86,11 +87,13 @@ module PointCloudImporter
         format('Color bench: стартуем сценарий %<name>s', name: scenario[:name])
       end
 
+      started_at = Clock.monotonic
+
       @current = {
         scenario: scenario,
-        started_at: monotonic_time,
+        started_at: started_at,
         pending_seen: false,
-        pending_deadline: monotonic_time + PENDING_TIMEOUT,
+        pending_deadline: started_at + PENDING_TIMEOUT,
         peak_memory: memory_usage
       }
 
@@ -114,14 +117,14 @@ module PointCloudImporter
       state[:pending_seen] ||= pending
 
       return if pending
-      return if !state[:pending_seen] && monotonic_time < state[:pending_deadline]
+      return if !state[:pending_seen] && Clock.monotonic < state[:pending_deadline]
 
       finalize_scenario(state)
     end
 
     def finalize_scenario(state)
       summary = @cloud.consume_last_color_rebuild_summary
-      finished_at = monotonic_time
+      finished_at = Clock.monotonic
       duration = extract_duration(summary, state, finished_at)
       processed = extract_processed(summary)
       rate = extract_rate(summary, processed, duration)
@@ -268,12 +271,6 @@ module PointCloudImporter
       stats[:heap_live_slots] || stats[:heap_used] || stats[:total_allocated_objects]
     rescue StandardError
       nil
-    end
-
-    def monotonic_time
-      Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    rescue StandardError
-      Time.now.to_f
     end
 
     def cancel_task
