@@ -526,8 +526,6 @@ module PointCloudImporter
         dialog_shown = true
         progress_dialog.show
       end
-      MainThreadDispatcher.enqueue { Logger.debug { 'DISPATCH_OK' } }
-      scheduler.schedule(name: 'ping', delay: 0.2) { Logger.debug { 'SCHED_OK' } }
 
       job.on_progress { MainThreadDispatcher.enqueue { progress_dialog.update } }
       job.on_state_change { MainThreadDispatcher.enqueue { progress_dialog.update } }
@@ -579,7 +577,7 @@ module PointCloudImporter
       end
 
       show_dialog_message = lambda do
-        show_dialog.call
+        MainThreadDispatcher.enqueue { show_dialog.call }
       end
 
       handle_message = lambda do |message, payload|
@@ -781,10 +779,6 @@ module PointCloudImporter
         Logger.debug { 'WORKER_STUCK' }
       end
 
-      scheduler.schedule(name: 'dialog-fallback', delay: 1.5) do
-        show_dialog_message.call
-      end
-
       Logger.debug { 'SPAWN_WORKER' }
       worker = Threading.run_background(
         name: 'import_worker',
@@ -974,6 +968,10 @@ module PointCloudImporter
       end
 
       job.thread = worker
+
+      scheduler.schedule(name: 'dialog-fallback', delay: 1.5) do
+        show_dialog_message.call
+      end
     end
 
     def finalize_job(job, notify: true)
