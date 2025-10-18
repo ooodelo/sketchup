@@ -271,8 +271,17 @@ module PointCloudImporter
     extend self
 
     def activate
+      return if defined?(@activated) && @activated
+
       Threading.register_ui_thread!
-      PointCloudImporter::MainThreadScheduler.instance.ensure_started
+      scheduler = PointCloudImporter::MainThreadScheduler.instance
+      scheduler.ensure_started
+      unless defined?(@scheduler_logged) && @scheduler_logged
+        if scheduler.started?
+          PointCloudImporter::Logger.debug { 'scheduler started' }
+          @scheduler_logged = true
+        end
+      end
       PointCloudImporter::Logger.debug do
         location = PointCloudImporter::Importer.instance_method(:run_job).source_location
         "Importer#run_job from: #{location.inspect}"
@@ -294,6 +303,8 @@ module PointCloudImporter
       manager = PointCloudImporter::Manager.instance
       PointCloudImporter::UI::Commands.instance(manager).register!
       PointCloudImporter::UI::FirstImportWizard.show_if_needed(manager)
+
+      @activated = true
     end
 
     activate
