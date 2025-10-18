@@ -6,7 +6,9 @@ require 'digest/sha1'
 require 'fileutils'
 require 'tmpdir'
 
+require_relative 'clock'
 require_relative 'logger'
+require_relative 'numbers'
 
 module PointCloudImporter
   # A lightweight KD-tree for nearest neighbor lookup.
@@ -282,7 +284,7 @@ module PointCloudImporter
 
         min_value = bounds[:min][axis]
         max_value = bounds[:max][axis]
-        bin_count = [[Math.log2(entries.length).ceil, 8].max, MAX_SAH_BINS].min
+        bin_count = Numbers.clamp(Math.log2(entries.length).ceil, 8, MAX_SAH_BINS)
         bin_count = 2 if bin_count < 2
 
         bins = Array.new(bin_count) { { count: 0, bounds: nil } }
@@ -291,7 +293,7 @@ module PointCloudImporter
         entries.each do |point, _index|
           coordinate_value = coordinate(point, axis)
           bin_index = ((coordinate_value - min_value) * scale).floor
-          bin_index = [[bin_index, bin_count - 1].min, 0].max
+          bin_index = Numbers.clamp(bin_index, 0, bin_count - 1)
           bin = bins[bin_index]
           bin[:count] += 1
           bin[:bounds] = merge_bounds(bin[:bounds], point_bounds(point))
@@ -582,12 +584,13 @@ module PointCloudImporter
         return Step.new([], 1.0, true) if finished?
 
         ready_nodes = []
-        deadline = time_budget ? monotonic_time + time_budget.to_f : nil
+        start_time = Clock.monotonic
+        deadline = time_budget ? start_time + time_budget.to_f : nil
 
         while (work = @queue.shift)
           node, entries, depth, bounds = work
           process(node, entries, depth, bounds, ready_nodes)
-          break if deadline && monotonic_time >= deadline
+          break if deadline && Clock.monotonic >= deadline
         end
 
         progress = progress_fraction
@@ -656,7 +659,7 @@ module PointCloudImporter
         return 1.0 if @total.zero?
 
         value = @processed.to_f / @total
-        [[value, 0.0].max, 1.0].min
+        Numbers.clamp(value, 0.0, 1.0)
       rescue StandardError
         0.0
       end
@@ -669,15 +672,6 @@ module PointCloudImporter
         Logger.debug { "Spatial index builder progress failed: #{e.class}: #{e.message}" }
       end
 
-      def monotonic_time
-        Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      rescue NameError, Errno::EINVAL
-        Process.clock_gettime(:float_second)
-      rescue NameError, ArgumentError, Errno::EINVAL
-        Process.clock_gettime(Process::CLOCK_REALTIME)
-      rescue NameError, Errno::EINVAL
-        Time.now.to_f
-      end
     end
   end
 end

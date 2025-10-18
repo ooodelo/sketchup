@@ -4,6 +4,7 @@
 require 'matrix'
 
 require_relative 'spatial_index'
+require_relative 'numbers'
 
 module PointCloudImporter
   # Performs adaptive sampling of a point cloud for inference guides.
@@ -140,7 +141,7 @@ module PointCloudImporter
     end
 
     def report_sampling_progress(fraction)
-      eased = [[fraction.to_f, 0.0].max, 1.0].min
+      eased = Numbers.clamp(fraction.to_f, 0.0, 1.0)
       stage_progress = 0.3 + (0.5 * eased)
       report_progress(:selection, stage_progress)
     end

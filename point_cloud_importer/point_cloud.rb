@@ -4,6 +4,9 @@
 require 'weakref'
 require 'thread'
 
+require_relative 'clock'
+require_relative 'fmt'
+require_relative 'numbers'
 require_relative 'settings'
 require_relative 'spatial_index'
 require_relative 'octree'
@@ -14,6 +17,7 @@ require_relative 'threading'
 require_relative 'main_thread_queue'
 require_relative 'progress_estimator'
 require_relative 'telemetry_logger'
+require_relative 'ui_status'
 
 module PointCloudImporter
   # Data structure representing a point cloud and display preferences.
@@ -1764,7 +1768,7 @@ module PointCloudImporter
     end
 
     def clamp01(value)
-      [[value, 0.0].max, 1.0].min
+      Numbers.clamp(value.to_f, 0.0, 1.0)
     rescue StandardError
       0.0
     end
@@ -2274,7 +2278,7 @@ module PointCloudImporter
                  end
 
       message = build_color_status_message(metrics, fraction)
-      now = estimator.monotonic_time
+      now = Clock.monotonic
 
       should_emit = force || estimator.poll(message: message,
                                            fraction: fraction,
@@ -2282,11 +2286,7 @@ module PointCloudImporter
                                            respect_message_change: false)
       return unless should_emit
 
-      begin
-        Sketchup.status_text = message if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
-      rescue StandardError
-        nil
-      end
+      UIStatus.set(message)
     end
 
     def build_color_status_message(metrics, fraction)
@@ -2303,11 +2303,18 @@ module PointCloudImporter
 
       percent = fraction ? (fraction * 100.0) : 0.0
 
-      format('Перекраска облака: %<percent>.1f%% (%<processed>s/%<total>s, %<rate>s)',
-             percent: percent,
-             processed: format_point_count(processed),
-             total: format_point_count(total),
-             rate: format_rate(rate))
+      base_message = format('Перекраска облака: %<percent>.1f%% (%<processed>s/%<total>s, %<rate>s)',
+                            percent: percent,
+                            processed: format_point_count(processed),
+                            total: format_point_count(total),
+                            rate: format_rate(rate))
+
+      peak_memory = metrics[:peak_memory]
+      memory_note = if peak_memory && peak_memory.to_i.positive?
+                      "пик: #{Fmt.bytes(peak_memory)}"
+                    end
+
+      [base_message, memory_note].compact.join(' • ')
     rescue StandardError
       'Перекраска облака'
     end
@@ -2320,31 +2327,13 @@ module PointCloudImporter
     end
 
     def format_point_count(value)
-      count = value.to_i
-      return '0' if count <= 0
-
-      if count >= 1_000_000
-        format('%.1fM', count / 1_000_000.0)
-      elsif count >= 1_000
-        format('%.1fk', count / 1_000.0)
-      else
-        count.to_s
-      end
+      Fmt.n(value, round_small: false)
     rescue StandardError
-      count.to_s
+      '0'
     end
 
     def format_rate(value)
-      return '0 тчк/с' unless value && value.finite? && value.positive?
-
-      rate = value.to_f
-      if rate >= 1_000_000.0
-        format('%.1fM тчк/с', rate / 1_000_000.0)
-      elsif rate >= 1_000.0
-        format('%.1fk тчк/с', rate / 1_000.0)
-      else
-        format('%d тчк/с', rate.round)
-      end
+      Fmt.n(value, suffix: ' тчк/с')
     rescue StandardError
       '0 тчк/с'
     end
@@ -3797,7 +3786,7 @@ module PointCloudImporter
     end
 
     def safe_monotonic_time
-      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      Clock.monotonic
     rescue StandardError
       Time.now.to_f
     end
@@ -3812,9 +3801,7 @@ module PointCloudImporter
 
     def normalize_density(value)
       density = value.to_f
-      density = 0.01 if density <= 0.0
-      density = 1.0 if density > 1.0
-      density
+      Numbers.clamp(density, 0.01, 1.0)
     end
 
     def filter_indices_for_density(indices)

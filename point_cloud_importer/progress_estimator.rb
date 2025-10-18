@@ -1,6 +1,8 @@
 # encoding: utf-8
 # frozen_string_literal: true
 
+require_relative 'clock'
+
 module PointCloudImporter
   # Estimates completion using vertex counts and/or consumed bytes.
   class ProgressEstimator
@@ -75,18 +77,12 @@ module PointCloudImporter
       nil
     end
 
-    def poll(message: nil, fraction: nil, force: false, now: monotonic_time, respect_message_change: true)
+    def poll(message: nil, fraction: nil, force: false, now: Clock.monotonic, respect_message_change: true)
       comparison_message = respect_message_change ? message : @last_message
       return false unless ready_to_emit?(now, message: comparison_message, fraction: fraction, force: force)
 
       mark_emitted(now, message: message)
       true
-    end
-
-    def monotonic_time
-      Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    rescue NameError, Errno::EINVAL
-      Time.now.to_f
     end
 
     private
