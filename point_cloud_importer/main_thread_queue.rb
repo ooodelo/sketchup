@@ -49,6 +49,7 @@ module PointCloudImporter
       @tasks_sorted = true
       @explicitly_started = false
       @start_warning_emitted = false
+      @started = false
     end
 
     def schedule(name:, priority: 0, delay: 0.0, quota: DEFAULT_TICK_BUDGET, cancel_if: nil, &block)
@@ -84,10 +85,28 @@ module PointCloudImporter
     def ensure_started
       Threading.guard(:ui, message: 'MainThreadScheduler#ensure_started')
 
+      started_now = false
+
       @mutex.synchronize do
+        if @started
+          start_timer_locked unless @timer_id
+          return true
+        end
+
         @explicitly_started = true
-        start_timer_locked
+
+        started_now = start_timer_locked
+        if started_now
+          @started = true
+        elsif @timer_id
+          @started = true
+          started_now = true
+        else
+          @explicitly_started = false
+        end
       end
+
+      Logger.debug { 'scheduler started' } if started_now
 
       true
     rescue StandardError => e
@@ -258,14 +277,16 @@ module PointCloudImporter
     end
 
     def start_timer_locked
-      return unless defined?(::UI)
-      return if @timer_id
+      return false unless defined?(::UI)
+      return false if @timer_id
 
       begin
         @timer_id = ::UI.start_timer(TIMER_INTERVAL, repeat: true) { process_tick }
+        !@timer_id.nil?
       rescue StandardError => e
         Logger.debug { "Failed to start scheduler timer: #{e.class}: #{e.message}" }
         @timer_id = nil
+        false
       end
     end
 
