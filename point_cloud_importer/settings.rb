@@ -97,6 +97,161 @@ module PointCloudImporter
 
     PRESET_CONTROLLED_KEYS = IMPORT_PRESETS.values.flat_map(&:keys).uniq.freeze
 
+    class << self
+      def normalize!(values)
+        return {} unless values.is_a?(Hash)
+
+        values.each_with_object({}) do |(raw_key, raw_value), memo|
+          key = normalize_key(raw_key)
+          next unless key && DEFAULTS.key?(key)
+
+          memo[key] = normalize_value(key, raw_value)
+        end
+      end
+
+      private
+
+      def normalize_key(key)
+        case key
+        when Symbol
+          key
+        else
+          string = key.to_s
+          string = string.strip
+          return nil if string.empty?
+
+          string.to_sym
+        end
+      rescue StandardError
+        nil
+      end
+
+      def normalize_value(key, value)
+        case key
+        when :point_style
+          candidate = value.to_sym
+          if defined?(PointCloudImporter::PointCloud::POINT_STYLE_CANDIDATES) &&
+             !PointCloudImporter::PointCloud::POINT_STYLE_CANDIDATES.key?(candidate)
+            DEFAULTS[:point_style]
+          else
+            candidate
+          end
+        when :color_mode
+          candidate = value.to_sym
+          if defined?(PointCloudImporter::PointCloud::COLOR_MODE_LOOKUP) &&
+             !PointCloudImporter::PointCloud::COLOR_MODE_LOOKUP.key?(candidate)
+            DEFAULTS[:color_mode]
+          else
+            candidate
+          end
+        when :color_gradient
+          candidate = value.to_sym
+          if defined?(PointCloudImporter::PointCloud::COLOR_GRADIENTS) &&
+             !PointCloudImporter::PointCloud::COLOR_GRADIENTS.key?(candidate)
+            DEFAULTS[:color_gradient]
+          else
+            candidate
+          end
+        when :single_color
+          value.to_s
+        when :import_chunk_size, :invalidate_every_n_chunks, :yield_interval, :binary_buffer_size,
+             :binary_vertex_batch_size, :startup_cap, :invalidate_interval_ms, :batch_vertices_limit,
+             :chunk_capacity, :max_points_sampled, :octree_max_points_per_node
+          positive_integer_or_default(key, value)
+        when :dialog_width, :dialog_height, :panel_width, :panel_height
+          dimension_integer_or_default(key, value)
+        when :point_size
+          value.to_i.clamp(1, 10)
+        when :max_display_points
+          positive_integer_or_default(key, value)
+        when :auto_apply_changes, :build_octree_async, :logging_enabled, :metrics_enabled
+          normalize_boolean(value)
+        when :density
+          density = value.to_f
+          density = DEFAULTS[:density] unless density.finite?
+          density.clamp(0.01, 1.0)
+        when :import_preset
+          normalize_preset_key(value) || :custom
+        when :stress_reference_path
+          value.to_s
+        when :stress_log_path
+          value.nil? ? nil : value.to_s
+        when :stress_long_phase_threshold
+          candidate = value.respond_to?(:to_f) ? value.to_f : Float(value)
+          candidate.positive? ? candidate : DEFAULTS[:stress_long_phase_threshold]
+        when :color_metrics_log_path, :color_bench_log_path
+          value.nil? ? nil : value.to_s
+        when :octree_max_depth
+          positive_integer_or_default(key, value)
+        when :color_economy_threshold, :sampling_target
+          positive_integer_or_default(key, value)
+        else
+          value
+        end
+      rescue StandardError
+        DEFAULTS[key]
+      end
+
+      def positive_integer_or_default(key, value)
+        candidate = value.to_i
+        candidate = DEFAULTS[key] if candidate <= 0
+        candidate
+      rescue StandardError
+        DEFAULTS[key]
+      end
+
+      def dimension_integer_or_default(key, value)
+        candidate = value.to_i
+        candidate = DEFAULTS[key] if candidate <= 0
+        candidate
+      rescue StandardError
+        DEFAULTS[key]
+      end
+
+      def normalize_preset_key(value)
+        key =
+          case value
+          when nil
+            nil
+          when Symbol
+            value
+          else
+            string = value.to_s.strip
+            return nil if string.empty?
+
+            string.downcase.to_sym
+          end
+
+        return key if key && (IMPORT_PRESETS.key?(key) || key == :custom)
+
+        nil
+      rescue StandardError
+        nil
+      end
+
+      def normalize_boolean(value)
+        case value
+        when true, false
+          value
+        when Numeric
+          !value.to_i.zero?
+        when String
+          stripped = value.strip.downcase
+          return true if %w[true 1 yes on].include?(stripped)
+          return false if %w[false 0 no off].include?(stripped)
+
+          !stripped.empty?
+        else
+          !!value
+        end
+      rescue StandardError
+        false
+      end
+
+      private :normalize_key, :normalize_value, :positive_integer_or_default,
+              :dimension_integer_or_default, :normalize_preset_key, :normalize_boolean
+    end
+
     attr_reader :values
 
     def initialize
@@ -125,7 +280,7 @@ module PointCloudImporter
     end
 
     def import_preset_parameters(key = @values[:import_preset])
-      preset_key = normalize_preset_key(key)
+      preset_key = self.class.send(:normalize_preset_key, key)
       return nil unless preset_key && IMPORT_PRESETS.key?(preset_key)
 
       IMPORT_PRESETS[preset_key].each_with_object({}) do |(setting_key, setting_value), memo|
@@ -140,10 +295,7 @@ module PointCloudImporter
     def load!
       stored = Sketchup.read_default(preferences_namespace, 'values')
       if stored.is_a?(Hash)
-        stored.each do |key, value|
-          key = key.to_sym
-          next unless DEFAULTS.key?(key)
-
+        self.class.normalize!(stored).each do |key, value|
           assign_value(key, value, persist: false)
         end
       end
@@ -162,10 +314,13 @@ module PointCloudImporter
     def save!(keys = nil, immediate: false)
       keys = Array(keys || @values.keys).map(&:to_sym)
       if immediate
-        keys.each do |key|
+        data = keys.each_with_object({}) do |key, memo|
           next unless @values.key?(key)
 
-          Sketchup.write_default(preferences_namespace, key.to_s, @values[key])
+          memo[key] = @values[key]
+        end
+        self.class.normalize!(data).each do |key, value|
+          Sketchup.write_default(preferences_namespace, key.to_s, value)
         end
       else
         SettingsBuffer.instance.commit!
@@ -178,45 +333,8 @@ module PointCloudImporter
       PREFERENCES_NAMESPACE
     end
 
-    def normalize_value(key, value)
-      case key
-      when :point_style
-        value.to_sym
-      when :color_mode, :color_gradient
-        value.to_sym
-      when :single_color
-        value.to_s
-      when :import_chunk_size, :invalidate_every_n_chunks, :yield_interval, :binary_buffer_size,
-           :binary_vertex_batch_size, :startup_cap, :invalidate_interval_ms, :batch_vertices_limit,
-           :chunk_capacity, :max_points_sampled, :octree_max_points_per_node, :octree_max_depth,
-           :color_economy_threshold
-        value.to_i
-      when :dialog_width, :dialog_height, :panel_width, :panel_height, :point_size, :max_display_points
-        value.to_i
-      when :auto_apply_changes, :build_octree_async, :logging_enabled, :metrics_enabled
-        normalize_boolean(value)
-      when :density
-        value.to_f
-      when :import_preset
-        normalize_preset_key(value) || :custom
-      when :stress_reference_path
-        value.to_s
-      when :stress_log_path
-        value.nil? ? nil : value.to_s
-      when :stress_long_phase_threshold
-        candidate = value.respond_to?(:to_f) ? value.to_f : Float(value)
-        candidate.positive? ? candidate : DEFAULTS[:stress_long_phase_threshold]
-      when :color_metrics_log_path, :color_bench_log_path
-        value.nil? ? nil : value.to_s
-      else
-        value
-      end
-    rescue StandardError
-      DEFAULTS[key]
-    end
-
     def assign_value(key, value, persist: true)
-      normalized = normalize_value(key, value)
+      normalized = self.class.send(:normalize_value, key, value)
       @values[key] = normalized
       if persist
         if defined?(PointCloudImporter::Config)
@@ -237,7 +355,7 @@ module PointCloudImporter
     private :mark_preset_as_custom!
 
     def apply_import_preset!(value)
-      preset_key = normalize_preset_key(value)
+      preset_key = self.class.send(:normalize_preset_key, value)
       preset_key = :custom if preset_key.nil?
 
       if preset_key == :custom
@@ -249,7 +367,7 @@ module PointCloudImporter
       return unless preset
 
       @applying_preset = true
-      preset.each do |setting_key, setting_value|
+      preset.to_h.each do |setting_key, setting_value|
         assign_value(setting_key, setting_value)
       end
       assign_value(:import_preset, preset_key)
@@ -257,44 +375,5 @@ module PointCloudImporter
       @applying_preset = false
     end
     private :apply_import_preset!
-
-    def normalize_preset_key(value)
-      key =
-        case value
-        when nil
-          nil
-        when Symbol
-          value
-        else
-          string = value.to_s.strip
-          return nil if string.empty?
-
-          string.downcase.to_sym
-        end
-
-      return key if key && (IMPORT_PRESETS.key?(key) || key == :custom)
-
-      nil
-    rescue StandardError
-      nil
-    end
-
-    def normalize_boolean(value)
-      case value
-      when true, false
-        value
-      when Numeric
-        !value.to_i.zero?
-      when String
-        stripped = value.strip.downcase
-        return true if %w[true 1 yes on].include?(stripped)
-        return false if %w[false 0 no off].include?(stripped)
-        !stripped.empty?
-      else
-        !!value
-      end
-    rescue StandardError
-      false
-    end
   end
 end

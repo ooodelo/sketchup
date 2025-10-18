@@ -97,7 +97,9 @@ module PointCloudImporter
       square: %i[DRAW_POINTS_SQUARES DRAW_POINTS_SQUARE DRAW_POINTS_OPEN_SQUARE],
       round: %i[DRAW_POINTS_ROUND DRAW_POINTS_OPEN_CIRCLE],
       plus: %i[DRAW_POINTS_PLUS DRAW_POINTS_CROSS]
-    }.freeze
+    }.each_with_object({}) do |(style, candidates), memo|
+      memo[style] = candidates.freeze
+    end.freeze
 
     LOD_LEVELS = [1.0, 0.5, 0.25, 0.1, 0.05].freeze
 
@@ -107,7 +109,7 @@ module PointCloudImporter
       { level: 0.25, enter_ratio: 2.0, exit_ratio: 3.5 },
       { level: 0.1, enter_ratio: 3.0, exit_ratio: 5.0 },
       { level: 0.05, enter_ratio: 4.5, exit_ratio: Float::INFINITY }
-    ].freeze
+    ].map(&:freeze).freeze
 
     LOD_FADE_DURATION = 0.35
 
@@ -164,26 +166,32 @@ module PointCloudImporter
         [0.5, [33, 145, 140]],
         [0.75, [94, 201, 97]],
         [1.0, [253, 231, 37]]
-      ].freeze,
+      ],
       jet: [
         [0.0, [0, 0, 131]],
         [0.35, [0, 255, 255]],
         [0.5, [255, 255, 0]],
         [0.75, [255, 0, 0]],
         [1.0, [128, 0, 0]]
-      ].freeze,
+      ],
       grayscale: [
         [0.0, [0, 0, 0]],
         [1.0, [255, 255, 255]]
-      ].freeze,
+      ],
       magma: [
         [0.0, [0, 0, 4]],
         [0.25, [78, 18, 123]],
         [0.5, [187, 55, 84]],
         [0.75, [249, 142, 8]],
         [1.0, [251, 252, 191]]
-      ].freeze
-    }.freeze
+      ]
+    }.each_with_object({}) do |(key, stops), memo|
+      memo[key] = stops.map do |stop|
+        position, color = stop
+        color_array = Array(color).dup.freeze
+        [position, color_array].freeze
+      end.freeze
+    end.freeze
 
     class << self
       def pack_rgb(r, g, b)
