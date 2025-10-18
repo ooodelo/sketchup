@@ -238,10 +238,10 @@ module PointCloudImporter
           clamped_fraction = clamp_fraction(fraction)
         end
 
-        unless @progress_estimator.ready_to_emit?(now,
-                                                  message: message,
-                                                  fraction: clamped_fraction,
-                                                  force: force)
+        unless @progress_estimator.poll(message: message,
+                                        fraction: clamped_fraction,
+                                        force: force,
+                                        now: now)
           Logger.debug do
             'Пропуск обновления прогресса: сработал троттлинг (15 Гц)'
           end
@@ -253,7 +253,6 @@ module PointCloudImporter
         @progress = clamped_fraction unless clamped_fraction.nil?
         @message = message if message
         @last_progress_time = now
-        @progress_estimator.mark_emitted(now, message: message)
         listeners = @progress_listeners.dup
         updated = true
       end
