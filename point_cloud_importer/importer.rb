@@ -473,6 +473,14 @@ module PointCloudImporter
 
     def run_job(job)
       Threading.guard(:ui, message: 'Importer#run_job')
+      Logger.debug do
+        location = Importer.instance_method(:run_job).source_location
+        "Importer#run_job from: #{location.inspect}"
+      end
+      Logger.debug do
+        location = MainThreadScheduler.instance_method(:schedule).source_location
+        "MainThreadScheduler#schedule from: #{location.inspect}"
+      end
       scheduler = MainThreadScheduler.instance
       scheduler.ensure_started
       @last_result = nil
@@ -493,6 +501,7 @@ module PointCloudImporter
 
       progress_dialog_closed = false
       finalization_complete = false
+      dialog_shown = false
 
       progress_dialog = UI::ImportProgressDialog.new(
         job,
@@ -510,7 +519,13 @@ module PointCloudImporter
           open_log_file(candidate)
         end
       )
-      progress_dialog.show
+      show_dialog = lambda do
+        next if progress_dialog_closed
+        next if dialog_shown
+
+        dialog_shown = true
+        progress_dialog.show
+      end
       MainThreadDispatcher.enqueue { Logger.debug { 'DISPATCH_OK' } }
       scheduler.schedule(name: 'ping', delay: 0.2) { Logger.debug { 'SCHED_OK' } }
 
@@ -537,6 +552,8 @@ module PointCloudImporter
         return unless worker_finished && job.finished?
         return if finalization_complete
 
+        cancel_watchdogs.call
+
         if job.failed?
           finalization_complete = true
           finalize_job(job, notify: false)
@@ -551,9 +568,25 @@ module PointCloudImporter
         finalize_job(job)
       end
 
+      worker_watchdog_handle = nil
+      state_watchdog_handle = nil
+
+      cancel_watchdogs = lambda do
+        worker_watchdog_handle&.cancel
+        state_watchdog_handle&.cancel
+        worker_watchdog_handle = nil
+        state_watchdog_handle = nil
+      end
+
+      show_dialog_message = lambda do
+        show_dialog.call
+      end
+
       handle_message = lambda do |message, payload|
         begin
           case message
+          when :show_progress_dialog
+            show_dialog_message.call
           when :create_cloud
             return if job.cancel_requested? || job.finished?
 
@@ -718,22 +751,61 @@ module PointCloudImporter
         MainThreadDispatcher.enqueue { handle_message.call(message, payload) }
       end
 
+      state_watchdog_handle = scheduler.schedule(name: 'import-state-watchdog', delay: 1.0) do |context|
+        if job.finished?
+          cancel_watchdogs.call
+          next :done
+        end
+
+        begin
+          job.ensure_state_fresh!
+        rescue ImportJob::TimeoutError => e
+          Logger.debug { "Import job watchdog timeout: #{e.message}" }
+          handle_message.call(:failed, e)
+          handle_message.call(:worker_finished, nil)
+          cancel_watchdogs.call
+          next :done
+        rescue StandardError => e
+          Logger.debug { "Import job watchdog error: #{e.class}: #{e.message}" }
+          cancel_watchdogs.call
+          next :done
+        end
+
+        context.reschedule_in = 1.0
+        :reschedule
+      end
+
+      worker_watchdog_handle = scheduler.schedule(name: 'worker-watchdog', delay: 1.0) do
+        next if job.status == :running
+
+        Logger.debug { 'WORKER_STUCK' }
+      end
+
+      scheduler.schedule(name: 'dialog-fallback', delay: 1.5) do
+        show_dialog_message.call
+      end
+
+      Logger.debug { 'SPAWN_WORKER' }
       worker = Threading.run_background(
         name: 'import_worker',
         dispatcher: dispatch,
         on_failure: ->(error) { job.fail!(error) unless job.finished? }
       ) do
         begin
+          Logger.debug { 'WORKER_ENTER' }
           Threading.guard(:bg, message: 'import_worker')
           job.start!
+          dispatch.call(:show_progress_dialog)
           job.transition_async(:parsing)
           job.update_progress(processed_vertices: 0, message: 'Чтение PLY...')
           start_time = Time.now
+          Logger.debug { 'about to open parser' }
           parser = PlyParser.new(
             job.path,
             progress_callback: job.progress_callback,
             cancelled_callback: -> { job.cancel_requested? }
           )
+          Logger.debug { 'parser opened' }
 
           point_unit = job.options[:point_unit] || job.options[:detected_point_unit]
           sketchup_unit = job.options[:sketchup_unit]
@@ -896,6 +968,7 @@ module PointCloudImporter
           job.fail!(e)
           raise
         ensure
+          cancel_watchdogs.call
           dispatch.call(:worker_finished)
         end
       end
