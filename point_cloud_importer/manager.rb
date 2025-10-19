@@ -11,6 +11,7 @@ require_relative 'measure_tool'
 require_relative 'measurement_history'
 require_relative 'main_thread_queue'
 require_relative 'threading'
+require_relative 'ui/preview_layer'
 
 module PointCloudImporter
   # Central registry for loaded point clouds.
@@ -131,10 +132,26 @@ module PointCloudImporter
       Threading.guard(:ui, message: 'Manager#draw')
       clouds_snapshot = clouds
 
+      drawn_points = 0
+      preview_candidates = []
+
       clouds_snapshot.each do |cloud|
         next unless cloud.visible?
 
         cloud.draw(view, draw_context)
+
+        if cloud.respond_to?(:last_visible_point_count)
+          drawn_points += cloud.last_visible_point_count.to_i
+        end
+
+        if cloud.respond_to?(:render_cache_preparation_pending?) &&
+           cloud.render_cache_preparation_pending?
+          preview_candidates << cloud
+        end
+      end
+
+      if drawn_points <= 0 && !preview_candidates.empty?
+        UI::PreviewLayer.draw(view, preview_candidates)
       end
 
       draw_preview_measurement(view)
